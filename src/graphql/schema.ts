@@ -137,6 +137,43 @@ export const typeDefs = `#graphql
     SYSTEM
   }
 
+  """
+  Status of a friend request.
+
+  LIFECYCLE:
+  pending -> accepted (friendship created)
+  pending -> declined (request removed)
+  pending -> canceled (by sender)
+  """
+  enum FriendRequestStatus {
+    """Request is waiting for response"""
+    PENDING
+    """Request was accepted, users are now friends"""
+    ACCEPTED
+    """Request was declined by recipient"""
+    DECLINED
+    """Request was canceled by sender"""
+    CANCELED
+  }
+
+  """
+  Types of friend events for real-time updates.
+  """
+  enum FriendEventType {
+    """Someone sent you a friend request"""
+    FRIEND_REQUEST_RECEIVED
+    """Your friend request was accepted"""
+    FRIEND_REQUEST_ACCEPTED
+    """Your friend request was declined"""
+    FRIEND_REQUEST_DECLINED
+    """A friend removed you"""
+    FRIEND_REMOVED
+    """Someone blocked you (limited info for privacy)"""
+    USER_BLOCKED
+    """Someone unblocked you"""
+    USER_UNBLOCKED
+  }
+
   # ===========================================================================
   # OBJECT TYPES
   # ===========================================================================
@@ -227,6 +264,87 @@ export const typeDefs = `#graphql
 
     """When friend was last online (if offline)"""
     lastOnlineAt: String
+  }
+
+  """
+  A friend request between two users.
+
+  INTERVIEW TIP:
+  "Friend requests are stored in Redis Sorted Sets with timestamp as score.
+  This allows efficient pagination and automatic expiration of old requests."
+  """
+  type FriendRequest {
+    """Unique request identifier"""
+    id: ID!
+
+    """User who sent the request"""
+    fromUser: User!
+
+    """User who receives the request"""
+    toUser: User!
+
+    """Current status of the request"""
+    status: FriendRequestStatus!
+
+    """When the request was sent"""
+    createdAt: String!
+
+    """When the request was last updated"""
+    updatedAt: String!
+
+    """Optional message from sender"""
+    message: String
+  }
+
+  """
+  A friend suggestion based on mutual connections.
+  """
+  type FriendSuggestion {
+    """Suggested user to friend"""
+    user: User!
+
+    """Number of mutual friends"""
+    mutualFriendCount: Int!
+
+    """Some mutual friend names for context"""
+    mutualFriendNames: [String!]!
+  }
+
+  """
+  Real-time friend event for subscriptions.
+  """
+  type FriendEvent {
+    """Type of friend event"""
+    type: FriendEventType!
+
+    """User who initiated the action"""
+    fromUser: User
+
+    """Friend request (if applicable)"""
+    request: FriendRequest
+
+    """When the event occurred"""
+    timestamp: String!
+  }
+
+  """
+  Statistics about a user's friend network.
+  """
+  type FriendStats {
+    """Total number of friends"""
+    friendCount: Int!
+
+    """Number of friends currently online"""
+    onlineFriendCount: Int!
+
+    """Number of pending incoming requests"""
+    incomingRequestCount: Int!
+
+    """Number of pending outgoing requests"""
+    outgoingRequestCount: Int!
+
+    """Number of blocked users"""
+    blockedCount: Int!
   }
 
   """
@@ -482,15 +600,109 @@ export const typeDefs = `#graphql
 
     Returns friends sorted by online status (online first),
     then by gamertag alphabetically.
+
+    INTERVIEW TIP:
+    "We batch fetch presence data for all friends in one Redis MGET call
+    to avoid N+1 queries. This keeps the friends list fast even with
+    thousands of friends."
     """
-    friends: [FriendWithPresence!]!
+    friends(
+      """Maximum number of friends to return"""
+      limit: Int = 100
+      """Offset for pagination"""
+      offset: Int = 0
+      """Filter by online status"""
+      onlineOnly: Boolean = false
+    ): [FriendWithPresence!]!
 
     """
-    Get pending friend requests.
+    Get incoming friend requests (requests sent TO the current user).
+
+    AUTHENTICATION: Required
+
+    Returns requests sorted by most recent first.
+    """
+    incomingFriendRequests(
+      """Maximum number of requests to return"""
+      limit: Int = 50
+      """Offset for pagination"""
+      offset: Int = 0
+    ): [FriendRequest!]!
+
+    """
+    Get outgoing friend requests (requests sent BY the current user).
 
     AUTHENTICATION: Required
     """
-    friendRequests: [User!]!
+    outgoingFriendRequests(
+      """Maximum number of requests to return"""
+      limit: Int = 50
+      """Offset for pagination"""
+      offset: Int = 0
+    ): [FriendRequest!]!
+
+    """
+    Get friend statistics for the authenticated user.
+
+    AUTHENTICATION: Required
+    """
+    friendStats: FriendStats!
+
+    """
+    Get mutual friends between the authenticated user and another user.
+
+    AUTHENTICATION: Required
+
+    Useful for showing "X mutual friends" on profile pages.
+    """
+    mutualFriends(
+      """User to find mutual friends with"""
+      userId: ID!
+      """Maximum number of mutual friends to return"""
+      limit: Int = 10
+    ): [User!]!
+
+    """
+    Get friend suggestions based on mutual connections.
+
+    AUTHENTICATION: Required
+
+    ALGORITHM:
+    Finds users who are friends with your friends but not your friends.
+    Ranked by number of mutual connections.
+    """
+    friendSuggestions(
+      """Maximum number of suggestions to return"""
+      limit: Int = 10
+    ): [FriendSuggestion!]!
+
+    """
+    Check if the authenticated user is friends with another user.
+
+    AUTHENTICATION: Required
+    """
+    isFriend(userId: ID!): Boolean!
+
+    """
+    Check if the authenticated user has blocked another user.
+
+    AUTHENTICATION: Required
+    """
+    isBlocked(userId: ID!): Boolean!
+
+    """
+    Get the list of users blocked by the authenticated user.
+
+    AUTHENTICATION: Required
+    """
+    blockedUsers: [User!]!
+
+    """
+    Get pending friend requests (deprecated, use incomingFriendRequests).
+
+    AUTHENTICATION: Required
+    """
+    friendRequests: [User!]! @deprecated(reason: "Use incomingFriendRequests instead")
 
     # -------------------------------------------------------------------------
     # PRESENCE QUERIES
@@ -572,6 +784,152 @@ export const typeDefs = `#graphql
     AUTHENTICATION: Required
     """
     unreadNotificationCount: Int!
+
+    # -------------------------------------------------------------------------
+    # GAME QUERIES
+    # -------------------------------------------------------------------------
+
+    """
+    Get a game by ID.
+    """
+    game(id: ID!): Game
+
+    """
+    Search for games.
+    """
+    searchGames(query: String!, limit: Int = 20): [Game!]!
+
+    """
+    Get popular games.
+    """
+    popularGames(limit: Int = 10): [Game!]!
+
+    """
+    Get games by genre.
+    """
+    gamesByGenre(genre: String!, limit: Int = 20): [Game!]!
+
+    """
+    Get the authenticated user's game library.
+
+    AUTHENTICATION: Required
+    """
+    myGameLibrary(limit: Int = 50, offset: Int = 0): [UserGame!]!
+
+    """
+    Get a specific game from user's library.
+
+    AUTHENTICATION: Required
+    """
+    myGame(gameId: ID!): UserGame
+
+    """
+    Get achievements for a game.
+    """
+    gameAchievements(gameId: ID!): [Achievement!]!
+
+    """
+    Get user's unlocked achievements for a game.
+
+    AUTHENTICATION: Required
+    """
+    myAchievements(gameId: ID!): [UserAchievement!]!
+
+    """
+    Get user's trophy summary.
+
+    AUTHENTICATION: Required
+    """
+    myTrophySummary: TrophySummary!
+
+    """
+    Get user's active play session.
+
+    AUTHENTICATION: Required
+    """
+    myActiveSession: PlaySession
+
+    """
+    Get joinable sessions for a game.
+    """
+    joinableSessions(gameId: ID!): [PlaySession!]!
+
+    """
+    Get pending game invites.
+
+    AUTHENTICATION: Required
+    """
+    pendingGameInvites: [GameInvite!]!
+
+    # -------------------------------------------------------------------------
+    # ACTIVITY FEED QUERIES
+    # -------------------------------------------------------------------------
+
+    """
+    Get activity feed for authenticated user.
+
+    AUTHENTICATION: Required
+
+    Returns activities from friends, sorted by most recent.
+    """
+    activityFeed(limit: Int = 50, offset: Int = 0): [Activity!]!
+
+    """
+    Get activities for a specific user.
+
+    AUTHENTICATION: Required
+    """
+    userActivities(userId: ID!, limit: Int = 20): [Activity!]!
+
+    # -------------------------------------------------------------------------
+    # VOICE CHAT QUERIES
+    # -------------------------------------------------------------------------
+
+    """
+    Get available voice rooms.
+
+    AUTHENTICATION: Required
+    """
+    voiceRooms: [VoiceRoom!]!
+
+    """
+    Get a specific voice room.
+
+    AUTHENTICATION: Required
+    """
+    voiceRoom(id: ID!): VoiceRoom
+
+    """
+    Get user's current voice room.
+
+    AUTHENTICATION: Required
+    """
+    myVoiceRoom: VoiceRoom
+
+    # -------------------------------------------------------------------------
+    # PROFILE QUERIES
+    # -------------------------------------------------------------------------
+
+    """
+    Get extended profile for a user.
+
+    AUTHENTICATION: Required
+    """
+    userProfile(userId: ID!): UserProfile
+
+    """
+    Get authenticated user's profile.
+
+    AUTHENTICATION: Required
+    """
+    myProfile: UserProfile
+
+    """
+    Get user statistics.
+
+    AUTHENTICATION: Required
+    """
+    userStats(userId: ID!): UserStats
   }
 
   # ===========================================================================
@@ -655,32 +1013,116 @@ export const typeDefs = `#graphql
     # -------------------------------------------------------------------------
 
     """
-    Send a friend request.
+    Send a friend request to another user.
 
     AUTHENTICATION: Required
+
+    VALIDATION:
+    - Cannot friend yourself
+    - Cannot friend someone who blocked you
+    - Cannot friend someone you blocked
+    - Cannot send duplicate request
+    - Maximum 500 pending outgoing requests
+    - Target user must have less than 500 pending incoming requests
+
+    AUTO-ACCEPT:
+    If the target user already sent you a request, this will
+    automatically accept their request instead (mutual intent).
+
+    INTERVIEW TIP:
+    "We use Redis transactions (MULTI/EXEC) to atomically update
+    both users' request lists, preventing race conditions."
     """
-    sendFriendRequest(userId: ID!): OperationResult!
+    sendFriendRequest(
+      """ID of user to send request to"""
+      userId: ID!
+      """Optional message to include with request"""
+      message: String
+    ): FriendRequest!
 
     """
-    Accept a friend request.
+    Accept a friend request from another user.
 
     AUTHENTICATION: Required
+
+    Creates a bidirectional friend relationship.
+    Notifies the sender via real-time subscription.
     """
-    acceptFriendRequest(userId: ID!): OperationResult!
+    acceptFriendRequest(
+      """ID of user who sent the request"""
+      userId: ID!
+    ): FriendWithPresence!
 
     """
-    Decline a friend request.
+    Decline a friend request from another user.
 
     AUTHENTICATION: Required
+
+    The sender is NOT notified to avoid harassment.
     """
-    declineFriendRequest(userId: ID!): OperationResult!
+    declineFriendRequest(
+      """ID of user who sent the request"""
+      userId: ID!
+    ): OperationResult!
 
     """
-    Remove a friend.
+    Cancel an outgoing friend request.
 
     AUTHENTICATION: Required
+
+    Use this to withdraw a request you sent.
     """
-    removeFriend(userId: ID!): OperationResult!
+    cancelFriendRequest(
+      """ID of user the request was sent to"""
+      userId: ID!
+    ): OperationResult!
+
+    """
+    Remove a friend from your friends list.
+
+    AUTHENTICATION: Required
+
+    This removes the friendship for both users.
+    The other user is NOT notified (they'll just see you're gone).
+    """
+    removeFriend(
+      """ID of friend to remove"""
+      userId: ID!
+    ): OperationResult!
+
+    """
+    Block a user.
+
+    AUTHENTICATION: Required
+
+    EFFECTS:
+    - Removes existing friendship (if any)
+    - Cancels pending friend requests (both directions)
+    - Prevents future friend requests
+    - Hides your presence from the blocked user
+    - Prevents messaging between you
+
+    PRIVACY:
+    The blocked user is NOT explicitly notified.
+    They may notice they can't interact with you.
+    """
+    blockUser(
+      """ID of user to block"""
+      userId: ID!
+    ): OperationResult!
+
+    """
+    Unblock a user.
+
+    AUTHENTICATION: Required
+
+    After unblocking, you can send/receive friend requests again.
+    Does NOT restore the previous friendship.
+    """
+    unblockUser(
+      """ID of user to unblock"""
+      userId: ID!
+    ): OperationResult!
 
     # -------------------------------------------------------------------------
     # CHAT MUTATIONS
@@ -737,6 +1179,159 @@ export const typeDefs = `#graphql
     AUTHENTICATION: Required
     """
     markAllNotificationsAsRead: OperationResult!
+
+    # -------------------------------------------------------------------------
+    # GAME MUTATIONS
+    # -------------------------------------------------------------------------
+
+    """
+    Add a game to user's library.
+
+    AUTHENTICATION: Required
+    """
+    addGameToLibrary(gameId: ID!): UserGame!
+
+    """
+    Start a play session.
+
+    AUTHENTICATION: Required
+    """
+    startPlaySession(input: StartSessionInput!): PlaySession!
+
+    """
+    Send heartbeat to keep session alive.
+
+    AUTHENTICATION: Required
+    """
+    heartbeatSession: PlaySession
+
+    """
+    Update session activity.
+
+    AUTHENTICATION: Required
+    """
+    updateSessionActivity(
+      activity: String!
+      isJoinable: Boolean
+      partySize: Int
+    ): PlaySession
+
+    """
+    End the current play session.
+
+    AUTHENTICATION: Required
+    """
+    endPlaySession: OperationResult!
+
+    """
+    Unlock an achievement.
+
+    AUTHENTICATION: Required
+    """
+    unlockAchievement(achievementId: ID!): UserAchievement
+
+    """
+    Send a game invite.
+
+    AUTHENTICATION: Required
+    """
+    sendGameInvite(input: SendGameInviteInput!): GameInvite!
+
+    """
+    Accept a game invite.
+
+    AUTHENTICATION: Required
+    """
+    acceptGameInvite(inviteId: ID!): GameInvite!
+
+    """
+    Decline a game invite.
+
+    AUTHENTICATION: Required
+    """
+    declineGameInvite(inviteId: ID!): GameInvite!
+
+    # -------------------------------------------------------------------------
+    # ACTIVITY MUTATIONS
+    # -------------------------------------------------------------------------
+
+    """
+    Like an activity.
+
+    AUTHENTICATION: Required
+    """
+    likeActivity(activityId: ID!): Activity!
+
+    """
+    Unlike an activity.
+
+    AUTHENTICATION: Required
+    """
+    unlikeActivity(activityId: ID!): Activity!
+
+    # -------------------------------------------------------------------------
+    # VOICE CHAT MUTATIONS
+    # -------------------------------------------------------------------------
+
+    """
+    Create a voice room.
+
+    AUTHENTICATION: Required
+    """
+    createVoiceRoom(input: CreateVoiceRoomInput!): VoiceRoom!
+
+    """
+    Join a voice room.
+
+    AUTHENTICATION: Required
+    """
+    joinVoiceRoom(roomId: ID!): VoiceRoom!
+
+    """
+    Leave the current voice room.
+
+    AUTHENTICATION: Required
+    """
+    leaveVoiceRoom: OperationResult!
+
+    """
+    Toggle mute in voice room.
+
+    AUTHENTICATION: Required
+    """
+    toggleMute: VoiceParticipant!
+
+    """
+    Toggle deafen in voice room.
+
+    AUTHENTICATION: Required
+    """
+    toggleDeafen: VoiceParticipant!
+
+    # -------------------------------------------------------------------------
+    # PROFILE MUTATIONS
+    # -------------------------------------------------------------------------
+
+    """
+    Update user profile.
+
+    AUTHENTICATION: Required
+    """
+    updateProfile(input: UpdateProfileInput!): UserProfile!
+
+    """
+    Update privacy settings.
+
+    AUTHENTICATION: Required
+    """
+    updatePrivacy(input: UpdatePrivacyInput!): UserPrivacy!
+
+    """
+    Update trophy showcase.
+
+    AUTHENTICATION: Required
+    """
+    updateTrophyShowcase(achievementIds: [ID!]!): [TrophyShowcaseSlot]!
   }
 
   # ===========================================================================
@@ -814,6 +1409,36 @@ export const typeDefs = `#graphql
     newMessageNotification: Message!
 
     # -------------------------------------------------------------------------
+    # FRIEND SUBSCRIPTIONS
+    # -------------------------------------------------------------------------
+
+    """
+    Subscribe to friend events (requests, accepts, removes).
+
+    AUTHENTICATION: Required
+
+    Fires when:
+    - Someone sends you a friend request
+    - Someone accepts your friend request
+    - Someone removes you as a friend
+
+    INTERVIEW TIP:
+    "We use Redis Pub/Sub to broadcast friend events to all server instances.
+    Each instance then filters and pushes to the relevant WebSocket clients.
+    This enables horizontal scaling of real-time features."
+    """
+    friendEventReceived: FriendEvent!
+
+    """
+    Subscribe to incoming friend requests only.
+
+    AUTHENTICATION: Required
+
+    Useful for showing a notification badge on the friends icon.
+    """
+    friendRequestReceived: FriendRequest!
+
+    # -------------------------------------------------------------------------
     # NOTIFICATION SUBSCRIPTIONS
     # -------------------------------------------------------------------------
 
@@ -825,6 +1450,64 @@ export const typeDefs = `#graphql
     Fires when user receives any notification.
     """
     notificationReceived: Notification!
+
+    # -------------------------------------------------------------------------
+    # GAME SUBSCRIPTIONS
+    # -------------------------------------------------------------------------
+
+    """
+    Subscribe to game invites.
+
+    AUTHENTICATION: Required
+    """
+    gameInviteReceived: GameInvite!
+
+    """
+    Subscribe to friend game sessions.
+
+    AUTHENTICATION: Required
+
+    Fires when a friend starts or ends a game session.
+    """
+    friendSessionUpdated: PlaySession!
+
+    """
+    Subscribe to achievement unlocks.
+
+    AUTHENTICATION: Required
+
+    Fires when a friend unlocks an achievement.
+    """
+    friendAchievementUnlocked: UserAchievement!
+
+    # -------------------------------------------------------------------------
+    # ACTIVITY FEED SUBSCRIPTIONS
+    # -------------------------------------------------------------------------
+
+    """
+    Subscribe to new activities from friends.
+
+    AUTHENTICATION: Required
+    """
+    newActivity: Activity!
+
+    # -------------------------------------------------------------------------
+    # VOICE CHAT SUBSCRIPTIONS
+    # -------------------------------------------------------------------------
+
+    """
+    Subscribe to voice room updates.
+
+    AUTHENTICATION: Required
+    """
+    voiceRoomUpdated(roomId: ID!): VoiceRoom!
+
+    """
+    Subscribe to participant updates in a voice room.
+
+    AUTHENTICATION: Required
+    """
+    voiceParticipantUpdated(roomId: ID!): VoiceParticipant!
   }
 
   """
@@ -842,5 +1525,573 @@ export const typeDefs = `#graphql
 
     """Whether user is typing (true) or stopped (false)"""
     isTyping: Boolean!
+  }
+
+  # ===========================================================================
+  # GAME TYPES
+  # ===========================================================================
+
+  """
+  Trophy type matching PlayStation's system.
+  """
+  enum TrophyType {
+    BRONZE
+    SILVER
+    GOLD
+    PLATINUM
+  }
+
+  """
+  Achievement rarity based on unlock percentage.
+  """
+  enum AchievementRarity {
+    COMMON
+    RARE
+    ULTRA_RARE
+    LEGENDARY
+  }
+
+  """
+  Game invite status.
+  """
+  enum GameInviteStatus {
+    PENDING
+    ACCEPTED
+    DECLINED
+    EXPIRED
+  }
+
+  """
+  A game in the PlayStation catalog.
+  """
+  type Game {
+    """Unique game identifier"""
+    id: ID!
+
+    """Game title"""
+    title: String!
+
+    """Publisher/developer name"""
+    publisher: String!
+
+    """Primary genre"""
+    genre: String!
+
+    """Additional tags"""
+    tags: [String!]!
+
+    """Release date (ISO 8601)"""
+    releaseDate: String!
+
+    """Cover art URL"""
+    coverUrl: String!
+
+    """Background art URL"""
+    backgroundUrl: String!
+
+    """Short description"""
+    description: String!
+
+    """Average rating (1-5)"""
+    rating: Float!
+
+    """Total number of ratings"""
+    ratingCount: Int!
+
+    """Maximum players for multiplayer"""
+    maxPlayers: Int!
+
+    """Supported platforms"""
+    platforms: [String!]!
+
+    """Total achievements available"""
+    totalAchievements: Int!
+
+    """Estimated playtime in hours"""
+    estimatedPlaytime: Int!
+  }
+
+  """
+  A game in a user's library with their progress.
+  """
+  type UserGame {
+    """Game details"""
+    game: Game!
+
+    """When the user acquired this game"""
+    purchasedAt: String!
+
+    """Total playtime in minutes"""
+    playtimeMinutes: Int!
+
+    """When the user last played"""
+    lastPlayedAt: String
+
+    """Number of achievements unlocked"""
+    achievementsUnlocked: Int!
+
+    """Completion percentage (achievements)"""
+    completionPercent: Float!
+
+    """Whether currently playing"""
+    isPlaying: Boolean!
+  }
+
+  """
+  A game achievement/trophy.
+  """
+  type Achievement {
+    """Unique achievement identifier"""
+    id: ID!
+
+    """Game this achievement belongs to"""
+    gameId: ID!
+
+    """Achievement name"""
+    name: String!
+
+    """Description of how to unlock"""
+    description: String!
+
+    """Icon URL"""
+    iconUrl: String!
+
+    """Trophy type"""
+    trophyType: TrophyType!
+
+    """Rarity based on unlock percentage"""
+    rarity: AchievementRarity!
+
+    """Percentage of players who have unlocked this"""
+    unlockPercentage: Float!
+
+    """Points value"""
+    points: Int!
+
+    """Whether this is a hidden/secret achievement"""
+    isHidden: Boolean!
+  }
+
+  """
+  An unlocked achievement for a user.
+  """
+  type UserAchievement {
+    """The achievement"""
+    achievement: Achievement!
+
+    """When it was unlocked"""
+    unlockedAt: String!
+
+    """Screenshot taken at unlock (optional)"""
+    screenshotUrl: String
+  }
+
+  """
+  Trophy summary for a user.
+  """
+  type TrophySummary {
+    bronze: Int!
+    silver: Int!
+    gold: Int!
+    platinum: Int!
+    total: Int!
+  }
+
+  """
+  An active play session.
+  """
+  type PlaySession {
+    """Unique session identifier"""
+    id: ID!
+
+    """User playing"""
+    userId: ID!
+
+    """User's gamertag"""
+    gamertag: String!
+
+    """Game being played"""
+    gameId: ID!
+
+    """Game title"""
+    gameTitle: String!
+
+    """When the session started"""
+    startedAt: String!
+
+    """Current activity (e.g., "Story Mode", "Online Match")"""
+    activity: String!
+
+    """Whether session is joinable"""
+    isJoinable: Boolean!
+
+    """Current party size if multiplayer"""
+    partySize: Int!
+
+    """Maximum party size"""
+    maxPartySize: Int!
+
+    """Platform (PS5, PC, etc.)"""
+    platform: String!
+  }
+
+  """
+  A game invite from one user to another.
+  """
+  type GameInvite {
+    """Unique invite identifier"""
+    id: ID!
+
+    """User who sent the invite"""
+    fromUser: User!
+
+    """User receiving the invite"""
+    toUserId: ID!
+
+    """Game to join"""
+    game: Game!
+
+    """Session to join"""
+    sessionId: ID!
+
+    """When the invite was sent"""
+    createdAt: String!
+
+    """When the invite expires"""
+    expiresAt: String!
+
+    """Invite status"""
+    status: GameInviteStatus!
+
+    """Optional message"""
+    message: String
+  }
+
+  # ===========================================================================
+  # ACTIVITY FEED TYPES
+  # ===========================================================================
+
+  """
+  Types of activities in the feed.
+  """
+  enum ActivityType {
+    GAME_STARTED
+    GAME_ENDED
+    ACHIEVEMENT_UNLOCKED
+    GAME_COMPLETED
+    FRIEND_ADDED
+    STATUS_CHANGED
+    TROPHY_MILESTONE
+  }
+
+  """
+  An activity item in the feed.
+  """
+  type Activity {
+    """Unique activity identifier"""
+    id: ID!
+
+    """Type of activity"""
+    type: ActivityType!
+
+    """User who performed the action"""
+    user: User!
+
+    """Activity title"""
+    title: String!
+
+    """Optional description"""
+    description: String
+
+    """Game if game-related"""
+    game: Game
+
+    """Achievement if achievement-related"""
+    achievement: Achievement
+
+    """When the activity occurred"""
+    createdAt: String!
+
+    """Number of likes"""
+    likeCount: Int!
+
+    """Number of comments"""
+    commentCount: Int!
+
+    """Whether current user liked this"""
+    isLiked: Boolean!
+  }
+
+  # ===========================================================================
+  # VOICE CHAT TYPES
+  # ===========================================================================
+
+  """
+  Voice room state.
+  """
+  enum VoiceRoomState {
+    WAITING
+    ACTIVE
+    ENDED
+  }
+
+  """
+  Participant connection state.
+  """
+  enum VoiceParticipantState {
+    CONNECTING
+    CONNECTED
+    MUTED
+    DEAFENED
+    DISCONNECTED
+  }
+
+  """
+  A voice chat room (PlayStation Party).
+  """
+  type VoiceRoom {
+    """Unique room identifier"""
+    id: ID!
+
+    """Room name"""
+    name: String!
+
+    """User who created the room"""
+    host: User!
+
+    """Current room state"""
+    state: VoiceRoomState!
+
+    """Maximum participants allowed"""
+    maxParticipants: Int!
+
+    """Current participants"""
+    participants: [VoiceParticipant!]!
+
+    """Whether the room is private"""
+    isPrivate: Boolean!
+
+    """Associated game"""
+    game: Game
+
+    """When the room was created"""
+    createdAt: String!
+  }
+
+  """
+  A participant in a voice room.
+  """
+  type VoiceParticipant {
+    """User"""
+    user: User!
+
+    """Connection state"""
+    state: VoiceParticipantState!
+
+    """Whether mic is muted"""
+    isMuted: Boolean!
+
+    """Whether audio is deafened"""
+    isDeafened: Boolean!
+
+    """Whether currently speaking"""
+    isSpeaking: Boolean!
+
+    """When the user joined"""
+    joinedAt: String!
+  }
+
+  # ===========================================================================
+  # USER PROFILE & STATS TYPES
+  # ===========================================================================
+
+  """
+  Visibility setting for privacy.
+  """
+  enum VisibilitySetting {
+    PUBLIC
+    FRIENDS
+    PRIVATE
+  }
+
+  """
+  Who can send requests/messages.
+  """
+  enum AllowSetting {
+    ANYONE
+    FRIENDS
+    FRIENDS_OF_FRIENDS
+    NOBODY
+  }
+
+  """
+  User privacy settings.
+  """
+  type UserPrivacy {
+    activityVisibility: VisibilitySetting!
+    libraryVisibility: VisibilitySetting!
+    trophyVisibility: VisibilitySetting!
+    friendRequestsFrom: AllowSetting!
+    gameInvitesFrom: AllowSetting!
+    messagesFrom: AllowSetting!
+    showOnlineStatus: Boolean!
+    showCurrentGame: Boolean!
+  }
+
+  """
+  Extended user profile with gaming statistics.
+  """
+  type UserProfile {
+    """Basic user info"""
+    user: User!
+
+    """Account creation date"""
+    memberSince: String!
+
+    """Profile background image URL"""
+    backgroundUrl: String
+
+    """Profile theme color"""
+    themeColor: String
+
+    """User's bio"""
+    bio: String
+
+    """Country/region"""
+    region: String
+
+    """Languages spoken"""
+    languages: [String!]!
+
+    """Privacy settings"""
+    privacy: UserPrivacy!
+
+    """Gaming statistics"""
+    stats: UserStats!
+
+    """Trophy showcase"""
+    trophyShowcase: [TrophyShowcaseSlot]!
+  }
+
+  """
+  User gaming statistics.
+  """
+  type UserStats {
+    """Total games in library"""
+    totalGames: Int!
+
+    """Total playtime in hours"""
+    totalPlaytimeHours: Float!
+
+    """Trophy level"""
+    trophyLevel: Int!
+
+    """Progress to next level (0-100)"""
+    trophyLevelProgress: Float!
+
+    """Trophy counts by type"""
+    trophies: TrophySummary!
+
+    """Most played game"""
+    mostPlayedGame: UserGame
+
+    """Friend count"""
+    friendCount: Int!
+  }
+
+  """
+  A slot in the trophy showcase.
+  """
+  type TrophyShowcaseSlot {
+    position: Int!
+    achievement: Achievement!
+    game: Game!
+    unlockedAt: String!
+  }
+
+  # ===========================================================================
+  # INPUT TYPES FOR GAMES
+  # ===========================================================================
+
+  """
+  Input for starting a play session.
+  """
+  input StartSessionInput {
+    """Game to play"""
+    gameId: ID!
+
+    """Current activity description"""
+    activity: String
+
+    """Whether session is joinable"""
+    isJoinable: Boolean
+
+    """Maximum party size"""
+    maxPartySize: Int
+
+    """Platform"""
+    platform: String
+  }
+
+  """
+  Input for sending a game invite.
+  """
+  input SendGameInviteInput {
+    """User to invite"""
+    toUserId: ID!
+
+    """Optional message"""
+    message: String
+  }
+
+  """
+  Input for creating a voice room.
+  """
+  input CreateVoiceRoomInput {
+    """Room name"""
+    name: String!
+
+    """Maximum participants"""
+    maxParticipants: Int
+
+    """Whether room is private"""
+    isPrivate: Boolean
+
+    """Associated game ID"""
+    gameId: ID
+  }
+
+  """
+  Input for updating profile.
+  """
+  input UpdateProfileInput {
+    """Background image URL"""
+    backgroundUrl: String
+
+    """Theme color"""
+    themeColor: String
+
+    """Bio text"""
+    bio: String
+
+    """Region"""
+    region: String
+
+    """Languages"""
+    languages: [String!]
+  }
+
+  """
+  Input for updating privacy settings.
+  """
+  input UpdatePrivacyInput {
+    activityVisibility: VisibilitySetting
+    libraryVisibility: VisibilitySetting
+    trophyVisibility: VisibilitySetting
+    friendRequestsFrom: AllowSetting
+    gameInvitesFrom: AllowSetting
+    messagesFrom: AllowSetting
+    showOnlineStatus: Boolean
+    showCurrentGame: Boolean
   }
 `;

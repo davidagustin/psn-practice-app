@@ -72,8 +72,6 @@ import {
   PresenceData,
   UpdatePresenceInput,
   PresenceUpdateEvent,
-  UserStatus,
-  PublicUser,
 } from '../../types';
 
 /**
@@ -521,8 +519,9 @@ export class PresenceService extends EventEmitter {
     // Build result map
     const result = new Map<string, PresenceData>();
     for (let i = 0; i < userIds.length; i++) {
-      if (values[i]) {
-        result.set(userIds[i], JSON.parse(values[i]));
+      const value = values[i];
+      if (value) {
+        result.set(userIds[i], JSON.parse(value));
       }
     }
 
@@ -672,6 +671,31 @@ export class PresenceService extends EventEmitter {
   getFriends(userId: string): string[] {
     const friends = this.friendsCache.get(userId);
     return friends ? [...friends] : [];
+  }
+
+  /**
+   * Remove a friend relationship.
+   *
+   * Removes the bidirectional relationship from the in-memory cache.
+   * In production, this would also update the database.
+   *
+   * @param userId - User removing the friend
+   * @param friendId - Friend being removed
+   */
+  removeFriend(userId: string, friendId: string): void {
+    // Remove from user's friend set
+    const userFriends = this.friendsCache.get(userId);
+    if (userFriends) {
+      userFriends.delete(friendId);
+    }
+
+    // Remove reverse relationship (friendships are mutual)
+    const friendsFriends = this.friendsCache.get(friendId);
+    if (friendsFriends) {
+      friendsFriends.delete(userId);
+    }
+
+    console.log(`[PresenceService] Friend removed from cache: ${userId} <-> ${friendId}`);
   }
 
   // ============================================================================

@@ -478,7 +478,7 @@ export class AuthService {
    * @param user - The authenticated user
    * @param message - Success message for logging
    */
-  private async createAuthResponse(user: User, message: string): Promise<AuthResponse> {
+  private async createAuthResponse(user: User, _message: string): Promise<AuthResponse> {
     // Generate JWT token
     const token = this.generateToken(user);
 
@@ -517,8 +517,8 @@ export class AuthService {
     // - iat (issued at): Current timestamp
     // - exp (expiration): Based on expiresIn option
     return jwt.sign(payload, this.config.jwtSecret, {
-      expiresIn: this.config.jwtExpiresIn,
-    });
+      expiresIn: this.config.jwtExpiresIn as string,
+    } as jwt.SignOptions);
   }
 
   /**

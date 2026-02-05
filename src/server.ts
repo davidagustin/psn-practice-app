@@ -100,6 +100,11 @@ import { createResolvers } from './graphql/resolvers';
 import { AuthService } from './services/auth/auth.service';
 import { PresenceService } from './services/presence/presence.service';
 import { ChatService } from './services/chat/chat.service';
+import { FriendService } from './services/friends/friend.service';
+import { GameService } from './services/game/game.service';
+import { ActivityService } from './services/activity/activity.service';
+import { VoiceService } from './services/voice/voice.service';
+import { ProfileService } from './services/profile/profile.service';
 import { GraphQLContext, JWTPayload } from './types';
 
 /**
@@ -198,14 +203,45 @@ async function startServer(): Promise<void> {
    * - Easy testing with mocks
    * - Clear dependency relationships
    * - Centralized configuration
+   *
+   * SERVICE ARCHITECTURE:
+   * ┌──────────────────────────────────────────────────────────────┐
+   * │                      SERVICES LAYER                          │
+   * │                                                              │
+   * │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐          │
+   * │  │ AuthService │  │PresenceServ│  │ ChatService │          │
+   * │  │             │  │             │  │             │          │
+   * │  │ - Register  │  │ - Online    │  │ - Messages  │          │
+   * │  │ - Login     │  │ - Status    │  │ - Rooms     │          │
+   * │  │ - JWT       │  │ - Heartbeat │  │ - Typing    │          │
+   * │  └─────────────┘  └─────────────┘  └─────────────┘          │
+   * │                                                              │
+   * │  ┌─────────────┐                                            │
+   * │  │FriendService│  ← NEW: Manages friend relationships       │
+   * │  │             │                                            │
+   * │  │ - Requests  │                                            │
+   * │  │ - Accept    │                                            │
+   * │  │ - Block     │                                            │
+   * │  └─────────────┘                                            │
+   * └──────────────────────────────────────────────────────────────┘
    */
   const authService = new AuthService(redis);
   const presenceService = new PresenceService(redis);
   const chatService = new ChatService(redis);
+  const friendService = new FriendService(redis);
+  const gameService = new GameService(redis);
+  const activityService = new ActivityService(redis);
+  const voiceService = new VoiceService(redis);
+  const profileService = new ProfileService(redis);
 
   console.log('[Server] ✓ AuthService initialized');
   console.log('[Server] ✓ PresenceService initialized');
   console.log('[Server] ✓ ChatService initialized');
+  console.log('[Server] ✓ FriendService initialized');
+  console.log('[Server] ✓ GameService initialized');
+  console.log('[Server] ✓ ActivityService initialized');
+  console.log('[Server] ✓ VoiceService initialized');
+  console.log('[Server] ✓ ProfileService initialized');
 
   /**
    * PUBSUB FOR GRAPHQL SUBSCRIPTIONS
@@ -221,7 +257,23 @@ async function startServer(): Promise<void> {
    */
   const pubsub = new PubSub();
 
-  // Wire up service events to PubSub
+  /**
+   * WIRING SERVICE EVENTS TO PUBSUB
+   *
+   * Services emit events when things happen.
+   * We wire these to the GraphQL PubSub for subscriptions.
+   *
+   * EVENT FLOW:
+   * 1. Service method called (e.g., updatePresence)
+   * 2. Service emits event via EventEmitter
+   * 3. We publish to PubSub here
+   * 4. PubSub pushes to subscribed WebSocket clients
+   *
+   * WHY THIS PATTERN?
+   * - Services don't know about GraphQL
+   * - Clean separation of concerns
+   * - Easy to add new event handlers
+   */
   presenceService.on('presenceUpdate', (event) => {
     pubsub.publish('FRIEND_PRESENCE_UPDATED', {
       friendPresenceUpdated: event.presence,
@@ -232,6 +284,99 @@ async function startServer(): Promise<void> {
     if (event.type === 'new_message' && event.message) {
       pubsub.publish(`MESSAGE_RECEIVED.${event.conversationId}`, {
         messageReceived: event.message,
+      });
+    }
+  });
+
+  /**
+   * Friend service events for real-time friend notifications.
+   *
+   * Events include:
+   * - friend_request_received: Someone sent you a request
+   * - friend_request_accepted: Your request was accepted
+   * - friend_removed: Someone unfriended you
+   */
+  friendService.on('friendEvent', (event) => {
+    // Publish to the affected user's channel
+    if (event.toUserId) {
+      pubsub.publish(`FRIEND_EVENT.${event.toUserId}`, {
+        friendEventReceived: {
+          type: event.type.toUpperCase().replace(/_/g, '_'),
+          fromUser: event.fromUserId ? { id: event.fromUserId, gamertag: event.fromGamertag } : null,
+          request: event.request,
+          timestamp: event.timestamp,
+        },
+      });
+
+      // Also publish specific request event
+      if (event.type === 'friend_request_received' && event.request) {
+        pubsub.publish(`FRIEND_REQUEST_RECEIVED.${event.toUserId}`, {
+          friendRequestReceived: event.request,
+        });
+      }
+    }
+  });
+
+  /**
+   * Game service events for real-time game updates.
+   *
+   * Events include:
+   * - session_started: User started playing a game
+   * - session_ended: User stopped playing
+   * - achievement_unlocked: User earned a trophy
+   * - game_invite_received: Someone sent a game invite
+   */
+  gameService.on('gameEvent', (event) => {
+    if (event.type === 'session_started' && event.session) {
+      pubsub.publish('FRIEND_SESSION_UPDATED', {
+        friendSessionUpdated: event.session,
+      });
+    }
+
+    if (event.type === 'achievement_unlocked' && event.achievement) {
+      pubsub.publish('FRIEND_ACHIEVEMENT_UNLOCKED', {
+        friendAchievementUnlocked: {
+          userId: event.userId,
+          achievement: event.achievement,
+          unlockedAt: event.timestamp,
+        },
+      });
+    }
+
+    if (event.type === 'game_invite_received' && event.invite) {
+      pubsub.publish(`GAME_INVITE_RECEIVED.${event.invite.toUserId}`, {
+        gameInviteReceived: event.invite,
+      });
+    }
+  });
+
+  /**
+   * Activity service events for real-time feed updates.
+   */
+  activityService.on('activityEvent', (event) => {
+    if (event.type === 'new_activity') {
+      // Publish to each friend who should see this activity
+      for (const userId of event.toUserIds) {
+        pubsub.publish(`NEW_ACTIVITY.${userId}`, {
+          newActivity: event.activity,
+        });
+      }
+    }
+  });
+
+  /**
+   * Voice service events for real-time voice chat updates.
+   */
+  voiceService.on('voiceEvent', (event) => {
+    if (event.room) {
+      pubsub.publish(`VOICE_ROOM_UPDATED.${event.roomId}`, {
+        voiceRoomUpdated: event.room,
+      });
+    }
+
+    if (event.participant) {
+      pubsub.publish(`VOICE_PARTICIPANT_UPDATED.${event.roomId}`, {
+        voiceParticipantUpdated: event.participant,
       });
     }
   });
@@ -271,7 +416,17 @@ async function startServer(): Promise<void> {
    * - Apollo Server (HTTP queries/mutations)
    * - WebSocket Server (subscriptions)
    */
-  const resolvers = createResolvers(authService, presenceService, chatService, pubsub);
+  const resolvers = createResolvers(
+    authService,
+    presenceService,
+    chatService,
+    friendService,
+    gameService,
+    activityService,
+    voiceService,
+    profileService,
+    pubsub
+  );
   const schema = makeExecutableSchema({
     typeDefs,
     resolvers,
@@ -353,26 +508,26 @@ async function startServer(): Promise<void> {
        * - Analytics
        * - Resource cleanup
        */
-      onConnect: async (ctx) => {
+      onConnect: async (_ctx) => {
         console.log('[WebSocket] Client connected');
 
         // You could require auth here:
-        // if (!ctx.connectionParams?.authorization) {
+        // if (!_ctx.connectionParams?.authorization) {
         //   return false; // Reject connection
         // }
 
         return true;
       },
 
-      onDisconnect: async (ctx, code, reason) => {
+      onDisconnect: async (_ctx, code, reason) => {
         console.log(`[WebSocket] Client disconnected: ${code} ${reason}`);
       },
 
-      onSubscribe: async (ctx, msg) => {
+      onSubscribe: async (_ctx, msg) => {
         console.log(`[WebSocket] New subscription: ${msg.payload.operationName || 'anonymous'}`);
       },
 
-      onError: async (ctx, msg, errors) => {
+      onError: async (_ctx, _msg, errors) => {
         console.error('[WebSocket] Error:', errors);
       },
     },
@@ -488,7 +643,7 @@ async function startServer(): Promise<void> {
    * - Kubernetes for liveness/readiness probes
    * - Monitoring systems
    */
-  app.get('/health', (req, res) => {
+  app.get('/health', (_req, res) => {
     res.json({
       status: 'healthy',
       timestamp: new Date().toISOString(),
@@ -605,6 +760,11 @@ async function startServer(): Promise<void> {
       // Clean up services
       await presenceService.cleanup();
       await chatService.cleanup();
+      await friendService.cleanup();
+      await gameService.cleanup();
+      await activityService.cleanup();
+      await voiceService.cleanup();
+      await profileService.cleanup();
       console.log('[Server] Services cleaned up');
 
       // Close Redis connection

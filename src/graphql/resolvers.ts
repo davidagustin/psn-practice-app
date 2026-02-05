@@ -57,7 +57,12 @@ import { PubSub } from 'graphql-subscriptions';
 import { AuthService } from '../services/auth/auth.service';
 import { PresenceService } from '../services/presence/presence.service';
 import { ChatService } from '../services/chat/chat.service';
-import { GraphQLContext, PresenceData, PublicUser } from '../types';
+import { FriendService } from '../services/friends/friend.service';
+import { GameService } from '../services/game/game.service';
+import { ActivityService } from '../services/activity/activity.service';
+import { VoiceService } from '../services/voice/voice.service';
+import { ProfileService } from '../services/profile/profile.service';
+import { GraphQLContext, PublicUser } from '../types';
 
 /**
  * Subscription event names.
@@ -68,11 +73,34 @@ import { GraphQLContext, PresenceData, PublicUser } from '../types';
  *
  * Using constants prevents typos and makes refactoring easier.
  */
+/**
+ * Subscription event names.
+ *
+ * PUBSUB PATTERN:
+ * Subscriptions work by publishing events to named channels.
+ * Subscribers listen to these channels and receive updates.
+ *
+ * Using constants prevents typos and makes refactoring easier.
+ *
+ * CHANNEL NAMING CONVENTION:
+ * - Global events: Simple name (FRIEND_PRESENCE_UPDATED)
+ * - User-specific: Name with suffix (.{userId})
+ * - Conversation-specific: Name with suffix (.{conversationId})
+ */
 const EVENTS = {
+  // Presence events
   FRIEND_PRESENCE_UPDATED: 'FRIEND_PRESENCE_UPDATED',
   USER_PRESENCE_UPDATED: 'USER_PRESENCE_UPDATED',
+
+  // Chat events
   MESSAGE_RECEIVED: 'MESSAGE_RECEIVED',
   USER_TYPING: 'USER_TYPING',
+
+  // Friend events
+  FRIEND_EVENT: 'FRIEND_EVENT',
+  FRIEND_REQUEST_RECEIVED: 'FRIEND_REQUEST_RECEIVED',
+
+  // Notification events
   NOTIFICATION_RECEIVED: 'NOTIFICATION_RECEIVED',
 };
 
@@ -86,15 +114,26 @@ const EVENTS = {
  * - Resolvers receive services as parameters
  * - Easy to test with mock services
  *
+ * INTERVIEW TIP:
+ * "Dependency injection makes our resolvers testable. We can inject
+ * mock services for unit tests without needing real Redis or databases.
+ * It also makes it easy to swap implementations."
+ *
  * @param authService - Authentication service
  * @param presenceService - Presence service
  * @param chatService - Chat service
+ * @param friendService - Friend management service
  * @param pubsub - PubSub instance for subscriptions
  */
 export const createResolvers = (
   authService: AuthService,
   presenceService: PresenceService,
   chatService: ChatService,
+  friendService: FriendService,
+  gameService: GameService,
+  activityService: ActivityService,
+  voiceService: VoiceService,
+  profileService: ProfileService,
   pubsub: PubSub
 ) => {
   /**
@@ -218,41 +257,244 @@ export const createResolvers = (
        * - Get all friend IDs at once
        * - Batch fetch all profiles (MGET in Redis, BatchGetItem in DynamoDB)
        * - Batch fetch all presences
+       *
+       * INTERVIEW TIP:
+       * "We solve the N+1 problem by batching. Redis MGET fetches all
+       * presence data in one round trip. For profiles, we use DynamoDB's
+       * BatchGetItem. This keeps latency constant regardless of friend count."
        */
-      friends: async (_: unknown, __: unknown, context: GraphQLContext) => {
+      friends: async (
+        _: unknown,
+        args: { limit?: number; offset?: number; onlineOnly?: boolean },
+        context: GraphQLContext
+      ) => {
         const userId = getUserId(context);
+        const limit = args.limit || 100;
+        const offset = args.offset || 0;
+        const onlineOnly = args.onlineOnly || false;
 
-        // Get friends with presence (batched internally)
-        const friendsWithPresence = await presenceService.getFriendsWithPresence(userId);
+        // Get friend IDs from FriendService
+        const friendIds = await friendService.getFriends(userId);
+
+        // Apply pagination
+        const paginatedIds = friendIds.slice(offset, offset + limit);
 
         // Batch fetch user profiles
-        const friendIds = friendsWithPresence.map((f) => f.friendId);
-        const profiles = await authService.getUsersByIds(friendIds);
-
-        // Combine profiles with presence
+        const profiles = await authService.getUsersByIds(paginatedIds);
         const profileMap = new Map(profiles.map((p) => [p.id, p]));
 
-        return friendsWithPresence.map((f) => ({
-          user: profileMap.get(f.friendId) || null,
-          presence: f.presence,
-          isOnline: f.isOnline,
-          lastOnlineAt: f.presence?.lastActiveAt
-            ? new Date(f.presence.lastActiveAt).toISOString()
-            : null,
+        // Batch fetch presence data
+        const friendsWithPresence = await presenceService.getFriendsWithPresence(userId);
+        const presenceMap = new Map(
+          friendsWithPresence.map((f) => [f.friendId, f])
+        );
+
+        // Combine profiles with presence
+        let results = paginatedIds.map((friendId) => {
+          const profile = profileMap.get(friendId);
+          const presenceInfo = presenceMap.get(friendId);
+
+          return {
+            user: profile || null,
+            presence: presenceInfo?.presence || null,
+            isOnline: presenceInfo?.isOnline || false,
+            lastOnlineAt: presenceInfo?.presence?.lastActiveAt
+              ? new Date(presenceInfo.presence.lastActiveAt).toISOString()
+              : null,
+          };
+        });
+
+        // Filter online only if requested
+        if (onlineOnly) {
+          results = results.filter((f) => f.isOnline);
+        }
+
+        // Sort: online first, then by gamertag
+        results.sort((a, b) => {
+          if (a.isOnline !== b.isOnline) {
+            return a.isOnline ? -1 : 1;
+          }
+          return (a.user?.gamertag || '').localeCompare(b.user?.gamertag || '');
+        });
+
+        return results;
+      },
+
+      /**
+       * Get incoming friend requests.
+       */
+      incomingFriendRequests: async (
+        _: unknown,
+        args: { limit?: number; offset?: number },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        const requests = await friendService.getFriendRequests(
+          userId,
+          'incoming',
+          args.limit || 50,
+          args.offset || 0
+        );
+
+        // Enrich with user profiles
+        const fromUserIds = requests.map((r) => r.fromUserId);
+        const profiles = await authService.getUsersByIds(fromUserIds);
+        const profileMap = new Map(profiles.map((p) => [p.id, p]));
+
+        return requests.map((request) => ({
+          ...request,
+          fromUser: profileMap.get(request.fromUserId),
+          toUser: { id: userId }, // Current user
+          status: request.status.toUpperCase(),
         }));
       },
 
       /**
-       * Get pending friend requests.
+       * Get outgoing friend requests.
+       */
+      outgoingFriendRequests: async (
+        _: unknown,
+        args: { limit?: number; offset?: number },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        const requests = await friendService.getFriendRequests(
+          userId,
+          'outgoing',
+          args.limit || 50,
+          args.offset || 0
+        );
+
+        // Enrich with user profiles
+        const toUserIds = requests.map((r) => r.toUserId);
+        const profiles = await authService.getUsersByIds(toUserIds);
+        const profileMap = new Map(profiles.map((p) => [p.id, p]));
+
+        return requests.map((request) => ({
+          ...request,
+          fromUser: { id: userId, gamertag: context.user!.gamertag },
+          toUser: profileMap.get(request.toUserId),
+          status: request.status.toUpperCase(),
+        }));
+      },
+
+      /**
+       * Get friend statistics.
+       */
+      friendStats: async (_: unknown, __: unknown, context: GraphQLContext) => {
+        const userId = getUserId(context);
+
+        // Parallel fetch all stats
+        const [
+          friendCount,
+          incomingRequests,
+          outgoingRequests,
+          blockedUsers,
+          friendsWithPresence,
+        ] = await Promise.all([
+          friendService.getFriendCount(userId),
+          friendService.getFriendRequests(userId, 'incoming', 1000, 0),
+          friendService.getFriendRequests(userId, 'outgoing', 1000, 0),
+          friendService.getBlockedUsers(userId),
+          presenceService.getFriendsWithPresence(userId),
+        ]);
+
+        const onlineFriendCount = friendsWithPresence.filter((f) => f.isOnline).length;
+
+        return {
+          friendCount,
+          onlineFriendCount,
+          incomingRequestCount: incomingRequests.length,
+          outgoingRequestCount: outgoingRequests.length,
+          blockedCount: blockedUsers.length,
+        };
+      },
+
+      /**
+       * Get mutual friends between two users.
+       */
+      mutualFriends: async (
+        _: unknown,
+        args: { userId: string; limit?: number },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        const mutualIds = await friendService.getMutualFriends(userId, args.userId);
+        const limitedIds = mutualIds.slice(0, args.limit || 10);
+        return authService.getUsersByIds(limitedIds);
+      },
+
+      /**
+       * Get friend suggestions.
+       */
+      friendSuggestions: async (
+        _: unknown,
+        args: { limit?: number },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        const suggestions = await friendService.getFriendSuggestions(
+          userId,
+          args.limit || 10
+        );
+
+        // Enrich with user profiles
+        const userIds = suggestions.map((s) => s.userId);
+        const profiles = await authService.getUsersByIds(userIds);
+        const profileMap = new Map(profiles.map((p) => [p.id, p]));
+
+        return suggestions.map((suggestion) => ({
+          user: profileMap.get(suggestion.userId),
+          mutualFriendCount: suggestion.mutualFriendCount,
+          mutualFriendNames: [], // Would need another query to get names
+        }));
+      },
+
+      /**
+       * Check if two users are friends.
+       */
+      isFriend: async (
+        _: unknown,
+        args: { userId: string },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        return friendService.areFriends(userId, args.userId);
+      },
+
+      /**
+       * Check if user is blocked.
+       */
+      isBlocked: async (
+        _: unknown,
+        args: { userId: string },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        return friendService.isBlocked(userId, args.userId);
+      },
+
+      /**
+       * Get blocked users.
+       */
+      blockedUsers: async (_: unknown, __: unknown, context: GraphQLContext) => {
+        const userId = getUserId(context);
+        const blockedIds = await friendService.getBlockedUsers(userId);
+        return authService.getUsersByIds(blockedIds);
+      },
+
+      /**
+       * Get pending friend requests (deprecated).
        */
       friendRequests: async (
         _: unknown,
         __: unknown,
         context: GraphQLContext
       ): Promise<PublicUser[]> => {
-        requireAuth(context);
-        // Mock: return empty array
-        return [];
+        const userId = getUserId(context);
+        const requests = await friendService.getFriendRequests(userId, 'incoming', 50, 0);
+        const fromUserIds = requests.map((r) => r.fromUserId);
+        return authService.getUsersByIds(fromUserIds);
       },
 
       // ------------------------------------------------------------------------
@@ -347,7 +589,7 @@ export const createResolvers = (
        */
       notifications: async (
         _: unknown,
-        args: { limit: number; unreadOnly: boolean },
+        _args: { limit: number; unreadOnly: boolean },
         context: GraphQLContext
       ) => {
         requireAuth(context);
@@ -365,6 +607,322 @@ export const createResolvers = (
       ) => {
         requireAuth(context);
         return 0;
+      },
+
+      // ------------------------------------------------------------------------
+      // GAME QUERIES
+      // ------------------------------------------------------------------------
+
+      /**
+       * Get a game by ID.
+       */
+      game: async (_: unknown, args: { id: string }) => {
+        return gameService.getGame(args.id);
+      },
+
+      /**
+       * Search for games.
+       */
+      searchGames: async (
+        _: unknown,
+        args: { query: string; limit?: number }
+      ) => {
+        return gameService.searchGames(args.query, args.limit || 20);
+      },
+
+      /**
+       * Get popular games.
+       */
+      popularGames: async (_: unknown, args: { limit?: number }) => {
+        return gameService.getPopularGames(args.limit || 10);
+      },
+
+      /**
+       * Get games by genre.
+       */
+      gamesByGenre: async (
+        _: unknown,
+        args: { genre: string; limit?: number }
+      ) => {
+        return gameService.getGamesByGenre(args.genre, args.limit || 20);
+      },
+
+      /**
+       * Get user's game library.
+       */
+      myGameLibrary: async (
+        _: unknown,
+        args: { limit?: number; offset?: number },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        return gameService.getUserLibrary(userId, args.limit || 50, args.offset || 0);
+      },
+
+      /**
+       * Get specific game from user's library.
+       */
+      myGame: async (
+        _: unknown,
+        args: { gameId: string },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        return gameService.getUserGame(userId, args.gameId);
+      },
+
+      /**
+       * Get achievements for a game.
+       */
+      gameAchievements: async (_: unknown, args: { gameId: string }) => {
+        return gameService.getGameAchievements(args.gameId);
+      },
+
+      /**
+       * Get user's unlocked achievements for a game.
+       */
+      myAchievements: async (
+        _: unknown,
+        args: { gameId: string },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        return gameService.getUserAchievements(userId, args.gameId);
+      },
+
+      /**
+       * Get user's trophy summary.
+       */
+      myTrophySummary: async (
+        _: unknown,
+        __: unknown,
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        return gameService.getTrophySummary(userId);
+      },
+
+      /**
+       * Get user's active play session.
+       */
+      myActiveSession: async (
+        _: unknown,
+        __: unknown,
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        return gameService.getActiveSession(userId);
+      },
+
+      /**
+       * Get joinable sessions for a game.
+       */
+      joinableSessions: async (_: unknown, args: { gameId: string }) => {
+        return gameService.getJoinableSessions(args.gameId);
+      },
+
+      /**
+       * Get pending game invites.
+       */
+      pendingGameInvites: async (
+        _: unknown,
+        __: unknown,
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        const invites = await gameService.getPendingInvites(userId);
+
+        // Enrich with user and game data
+        return Promise.all(invites.map(async (invite) => {
+          const fromUser = await authService.getUserById(invite.fromUserId);
+          const game = await gameService.getGame(invite.gameId);
+          return {
+            ...invite,
+            fromUser,
+            game,
+            status: invite.status.toUpperCase(),
+          };
+        }));
+      },
+
+      // ------------------------------------------------------------------------
+      // ACTIVITY FEED QUERIES
+      // ------------------------------------------------------------------------
+
+      /**
+       * Get activity feed.
+       */
+      activityFeed: async (
+        _: unknown,
+        args: { limit?: number; offset?: number },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        const activities = await activityService.getFeed(
+          userId,
+          args.limit || 50,
+          args.offset || 0
+        );
+
+        // Enrich with user and game data
+        return Promise.all(activities.map(async (activity) => {
+          const user = await authService.getUserById(activity.userId);
+          const game = activity.gameId
+            ? await gameService.getGame(activity.gameId)
+            : null;
+
+          return {
+            ...activity,
+            user,
+            game,
+            type: activity.type.toUpperCase(),
+          };
+        }));
+      },
+
+      /**
+       * Get activities for a specific user.
+       */
+      userActivities: async (
+        _: unknown,
+        args: { userId: string; limit?: number },
+        context: GraphQLContext
+      ) => {
+        const viewerId = getUserId(context);
+        return activityService.getUserActivities(
+          args.userId,
+          viewerId,
+          args.limit || 20
+        );
+      },
+
+      // ------------------------------------------------------------------------
+      // VOICE CHAT QUERIES
+      // ------------------------------------------------------------------------
+
+      /**
+       * Get available voice rooms.
+       */
+      voiceRooms: async (_: unknown, __: unknown, context: GraphQLContext) => {
+        requireAuth(context);
+        const rooms = await voiceService.getAvailableRooms();
+
+        // Enrich with host and participant data
+        return Promise.all(rooms.map(async (room) => {
+          const host = await authService.getUserById(room.hostId);
+          const participants = await voiceService.getParticipants(room.id);
+          const game = room.gameId ? await gameService.getGame(room.gameId) : null;
+
+          return {
+            ...room,
+            host,
+            participants: participants.map(p => ({
+              ...p,
+              user: { id: p.userId, gamertag: p.gamertag, avatar: p.avatar },
+              state: p.state.toUpperCase(),
+            })),
+            game,
+            state: room.state.toUpperCase(),
+          };
+        }));
+      },
+
+      /**
+       * Get a specific voice room.
+       */
+      voiceRoom: async (
+        _: unknown,
+        args: { id: string },
+        context: GraphQLContext
+      ) => {
+        requireAuth(context);
+        const room = await voiceService.getRoom(args.id);
+        if (!room) return null;
+
+        const host = await authService.getUserById(room.hostId);
+        const participants = await voiceService.getParticipants(room.id);
+        const game = room.gameId ? await gameService.getGame(room.gameId) : null;
+
+        return {
+          ...room,
+          host,
+          participants: participants.map(p => ({
+            ...p,
+            user: { id: p.userId, gamertag: p.gamertag, avatar: p.avatar },
+            state: p.state.toUpperCase(),
+          })),
+          game,
+          state: room.state.toUpperCase(),
+        };
+      },
+
+      /**
+       * Get user's current voice room.
+       */
+      myVoiceRoom: async (
+        _: unknown,
+        __: unknown,
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        const room = await voiceService.getUserRoom(userId);
+        if (!room) return null;
+
+        const host = await authService.getUserById(room.hostId);
+        const participants = await voiceService.getParticipants(room.id);
+
+        return {
+          ...room,
+          host,
+          participants: participants.map(p => ({
+            ...p,
+            user: { id: p.userId, gamertag: p.gamertag, avatar: p.avatar },
+            state: p.state.toUpperCase(),
+          })),
+          state: room.state.toUpperCase(),
+        };
+      },
+
+      // ------------------------------------------------------------------------
+      // PROFILE QUERIES
+      // ------------------------------------------------------------------------
+
+      /**
+       * Get user profile.
+       */
+      userProfile: async (
+        _: unknown,
+        args: { userId: string },
+        context: GraphQLContext
+      ) => {
+        const viewerId = getUserId(context);
+        const isFriend = await friendService.areFriends(viewerId, args.userId);
+        return profileService.getProfile(args.userId, viewerId, isFriend);
+      },
+
+      /**
+       * Get own profile.
+       */
+      myProfile: async (
+        _: unknown,
+        __: unknown,
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        return profileService.getOwnProfile(userId);
+      },
+
+      /**
+       * Get user stats.
+       */
+      userStats: async (
+        _: unknown,
+        args: { userId: string },
+        context: GraphQLContext
+      ) => {
+        const viewerId = getUserId(context);
+        const isFriend = await friendService.areFriends(viewerId, args.userId);
+        return profileService.getStats(args.userId, viewerId, isFriend);
       },
     },
 
@@ -497,19 +1055,70 @@ export const createResolvers = (
 
       /**
        * Send a friend request.
+       *
+       * FLOW:
+       * 1. Validate user isn't blocked, already friends, etc.
+       * 2. Check for reverse request (auto-accept if exists)
+       * 3. Create request in Redis
+       * 4. Publish event for real-time notification
        */
       sendFriendRequest: async (
         _: unknown,
-        args: { userId: string },
+        args: { userId: string; message?: string },
         context: GraphQLContext
       ) => {
-        requireAuth(context);
-        // Mock implementation
-        return { success: true, message: 'Friend request sent' };
+        const userId = getUserId(context);
+        const gamertag = context.user!.gamertag;
+
+        const request = await friendService.sendFriendRequest(
+          userId,
+          args.userId,
+          gamertag
+        );
+
+        // Publish event for real-time notification
+        pubsub.publish(`${EVENTS.FRIEND_REQUEST_RECEIVED}.${args.userId}`, {
+          friendRequestReceived: {
+            ...request,
+            fromUser: { id: userId, gamertag },
+            toUser: { id: args.userId },
+            status: request.status.toUpperCase(),
+          },
+        });
+
+        pubsub.publish(`${EVENTS.FRIEND_EVENT}.${args.userId}`, {
+          friendEventReceived: {
+            type: 'FRIEND_REQUEST_RECEIVED',
+            fromUser: { id: userId, gamertag },
+            request: {
+              ...request,
+              fromUser: { id: userId, gamertag },
+              toUser: { id: args.userId },
+              status: request.status.toUpperCase(),
+            },
+            timestamp: request.createdAt,
+          },
+        });
+
+        // Return enriched request
+        const toUser = await authService.getUserById(args.userId);
+        return {
+          ...request,
+          fromUser: { id: userId, gamertag },
+          toUser,
+          status: request.status.toUpperCase(),
+        };
       },
 
       /**
        * Accept a friend request.
+       *
+       * FLOW:
+       * 1. Verify request exists
+       * 2. Create bidirectional friend relationship
+       * 3. Remove pending requests
+       * 4. Publish event for real-time notification
+       * 5. Return new friend with presence
        */
       acceptFriendRequest: async (
         _: unknown,
@@ -517,35 +1126,117 @@ export const createResolvers = (
         context: GraphQLContext
       ) => {
         const userId = getUserId(context);
+        const gamertag = context.user!.gamertag;
 
-        // Add friend relationship
+        await friendService.acceptFriendRequest(userId, args.userId, gamertag);
+
+        // Also register in presence service for presence tracking
         presenceService.addFriend(userId, args.userId);
 
-        return { success: true, message: 'Friend request accepted' };
+        // Publish event to notify the original sender
+        pubsub.publish(`${EVENTS.FRIEND_EVENT}.${args.userId}`, {
+          friendEventReceived: {
+            type: 'FRIEND_REQUEST_ACCEPTED',
+            fromUser: { id: userId, gamertag },
+            timestamp: new Date().toISOString(),
+          },
+        });
+
+        // Get the new friend's profile and presence
+        const [friendProfile, presence] = await Promise.all([
+          authService.getUserById(args.userId),
+          presenceService.getPresence(args.userId),
+        ]);
+
+        return {
+          user: friendProfile,
+          presence,
+          isOnline: presence?.status !== 'offline',
+          lastOnlineAt: presence?.lastActiveAt
+            ? new Date(presence.lastActiveAt).toISOString()
+            : null,
+        };
       },
 
       /**
        * Decline a friend request.
+       *
+       * NOTE: The sender is NOT notified to prevent harassment.
+       * Their request will just disappear from their outgoing list.
        */
       declineFriendRequest: async (
         _: unknown,
         args: { userId: string },
         context: GraphQLContext
       ) => {
-        requireAuth(context);
+        const userId = getUserId(context);
+        await friendService.declineFriendRequest(userId, args.userId);
         return { success: true, message: 'Friend request declined' };
       },
 
       /**
+       * Cancel an outgoing friend request.
+       */
+      cancelFriendRequest: async (
+        _: unknown,
+        args: { userId: string },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        await friendService.cancelFriendRequest(userId, args.userId);
+        return { success: true, message: 'Friend request canceled' };
+      },
+
+      /**
        * Remove a friend.
+       *
+       * Removes the bidirectional relationship.
+       * The other user is NOT explicitly notified.
        */
       removeFriend: async (
         _: unknown,
         args: { userId: string },
         context: GraphQLContext
       ) => {
-        requireAuth(context);
+        const userId = getUserId(context);
+        await friendService.removeFriend(userId, args.userId);
+
+        // Also remove from presence service
+        presenceService.removeFriend(userId, args.userId);
+
         return { success: true, message: 'Friend removed' };
+      },
+
+      /**
+       * Block a user.
+       *
+       * Removes friendship, cancels requests, and prevents future interaction.
+       */
+      blockUser: async (
+        _: unknown,
+        args: { userId: string },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        await friendService.blockUser(userId, args.userId);
+
+        // Also remove from presence service
+        presenceService.removeFriend(userId, args.userId);
+
+        return { success: true, message: 'User blocked' };
+      },
+
+      /**
+       * Unblock a user.
+       */
+      unblockUser: async (
+        _: unknown,
+        args: { userId: string },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        await friendService.unblockUser(userId, args.userId);
+        return { success: true, message: 'User unblocked' };
       },
 
       // ------------------------------------------------------------------------
@@ -656,7 +1347,7 @@ export const createResolvers = (
        */
       markNotificationAsRead: async (
         _: unknown,
-        args: { notificationId: string },
+        _args: { notificationId: string },
         context: GraphQLContext
       ) => {
         requireAuth(context);
@@ -673,6 +1364,453 @@ export const createResolvers = (
       ) => {
         requireAuth(context);
         return { success: true, message: 'All notifications marked as read' };
+      },
+
+      // ------------------------------------------------------------------------
+      // GAME MUTATIONS
+      // ------------------------------------------------------------------------
+
+      /**
+       * Add a game to user's library.
+       */
+      addGameToLibrary: async (
+        _: unknown,
+        args: { gameId: string },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        return gameService.addGameToLibrary(userId, args.gameId);
+      },
+
+      /**
+       * Start a play session.
+       */
+      startPlaySession: async (
+        _: unknown,
+        args: {
+          input: {
+            gameId: string;
+            activity?: string;
+            isJoinable?: boolean;
+            maxPartySize?: number;
+            platform?: string;
+          };
+        },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        const gamertag = context.user!.gamertag;
+        return gameService.startSession(userId, gamertag, args.input.gameId, {
+          activity: args.input.activity,
+          isJoinable: args.input.isJoinable,
+          maxPartySize: args.input.maxPartySize,
+          platform: args.input.platform,
+        });
+      },
+
+      /**
+       * Heartbeat to keep session alive.
+       */
+      heartbeatSession: async (
+        _: unknown,
+        __: unknown,
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        return gameService.heartbeatSession(userId);
+      },
+
+      /**
+       * Update session activity.
+       */
+      updateSessionActivity: async (
+        _: unknown,
+        args: { activity: string; isJoinable?: boolean; partySize?: number },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        return gameService.updateSessionActivity(userId, args.activity, {
+          isJoinable: args.isJoinable,
+          partySize: args.partySize,
+        });
+      },
+
+      /**
+       * End play session.
+       */
+      endPlaySession: async (
+        _: unknown,
+        __: unknown,
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        const success = await gameService.endSession(userId);
+        return {
+          success,
+          message: success ? 'Session ended' : 'No active session',
+        };
+      },
+
+      /**
+       * Unlock an achievement.
+       */
+      unlockAchievement: async (
+        _: unknown,
+        args: { achievementId: string },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        const gamertag = context.user!.gamertag;
+        return gameService.unlockAchievement(userId, args.achievementId, gamertag);
+      },
+
+      /**
+       * Send a game invite.
+       */
+      sendGameInvite: async (
+        _: unknown,
+        args: { input: { toUserId: string; message?: string } },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        const gamertag = context.user!.gamertag;
+
+        // Get current session
+        const session = await gameService.getActiveSession(userId);
+        if (!session) {
+          throw new Error('You must be in an active session to send invites');
+        }
+
+        const invite = await gameService.sendGameInvite(
+          userId,
+          gamertag,
+          args.input.toUserId,
+          session.id,
+          args.input.message
+        );
+
+        const fromUser = await authService.getUserById(userId);
+        const game = await gameService.getGame(invite.gameId);
+
+        return {
+          ...invite,
+          fromUser,
+          game,
+          status: invite.status.toUpperCase(),
+        };
+      },
+
+      /**
+       * Accept a game invite.
+       */
+      acceptGameInvite: async (
+        _: unknown,
+        args: { inviteId: string },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        const invite = await gameService.acceptInvite(userId, args.inviteId);
+
+        const fromUser = await authService.getUserById(invite.fromUserId);
+        const game = await gameService.getGame(invite.gameId);
+
+        return {
+          ...invite,
+          fromUser,
+          game,
+          status: invite.status.toUpperCase(),
+        };
+      },
+
+      /**
+       * Decline a game invite.
+       */
+      declineGameInvite: async (
+        _: unknown,
+        args: { inviteId: string },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        const invite = await gameService.declineInvite(userId, args.inviteId);
+
+        const fromUser = await authService.getUserById(invite.fromUserId);
+        const game = await gameService.getGame(invite.gameId);
+
+        return {
+          ...invite,
+          fromUser,
+          game,
+          status: invite.status.toUpperCase(),
+        };
+      },
+
+      // ------------------------------------------------------------------------
+      // ACTIVITY MUTATIONS
+      // ------------------------------------------------------------------------
+
+      /**
+       * Like an activity.
+       */
+      likeActivity: async (
+        _: unknown,
+        args: { activityId: string },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        const activity = await activityService.likeActivity(args.activityId, userId);
+
+        if (!activity) {
+          throw new Error('Activity not found');
+        }
+
+        const user = await authService.getUserById(activity.userId);
+        const game = activity.gameId
+          ? await gameService.getGame(activity.gameId)
+          : null;
+
+        return {
+          ...activity,
+          user,
+          game,
+          type: activity.type.toUpperCase(),
+        };
+      },
+
+      /**
+       * Unlike an activity.
+       */
+      unlikeActivity: async (
+        _: unknown,
+        args: { activityId: string },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        const activity = await activityService.unlikeActivity(args.activityId, userId);
+
+        if (!activity) {
+          throw new Error('Activity not found');
+        }
+
+        const user = await authService.getUserById(activity.userId);
+        const game = activity.gameId
+          ? await gameService.getGame(activity.gameId)
+          : null;
+
+        return {
+          ...activity,
+          user,
+          game,
+          type: activity.type.toUpperCase(),
+        };
+      },
+
+      // ------------------------------------------------------------------------
+      // VOICE CHAT MUTATIONS
+      // ------------------------------------------------------------------------
+
+      /**
+       * Create a voice room.
+       */
+      createVoiceRoom: async (
+        _: unknown,
+        args: {
+          input: {
+            name: string;
+            maxParticipants?: number;
+            isPrivate?: boolean;
+            gameId?: string;
+          };
+        },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        const gamertag = context.user!.gamertag;
+
+        const room = await voiceService.createRoom({
+          name: args.input.name,
+          hostId: userId,
+          hostGamertag: gamertag,
+          maxParticipants: args.input.maxParticipants,
+          isPrivate: args.input.isPrivate,
+          gameId: args.input.gameId,
+          gameTitle: args.input.gameId
+            ? (await gameService.getGame(args.input.gameId))?.title
+            : undefined,
+        });
+
+        const host = await authService.getUserById(room.hostId);
+        const participants = await voiceService.getParticipants(room.id);
+
+        return {
+          ...room,
+          host,
+          participants: participants.map(p => ({
+            ...p,
+            user: { id: p.userId, gamertag: p.gamertag, avatar: p.avatar },
+            state: p.state.toUpperCase(),
+          })),
+          state: room.state.toUpperCase(),
+        };
+      },
+
+      /**
+       * Join a voice room.
+       */
+      joinVoiceRoom: async (
+        _: unknown,
+        args: { roomId: string },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        const gamertag = context.user!.gamertag;
+
+        const room = await voiceService.joinRoom(
+          args.roomId,
+          userId,
+          gamertag,
+          '🎮'
+        );
+
+        const host = await authService.getUserById(room.hostId);
+        const participants = await voiceService.getParticipants(room.id);
+
+        return {
+          ...room,
+          host,
+          participants: participants.map(p => ({
+            ...p,
+            user: { id: p.userId, gamertag: p.gamertag, avatar: p.avatar },
+            state: p.state.toUpperCase(),
+          })),
+          state: room.state.toUpperCase(),
+        };
+      },
+
+      /**
+       * Leave voice room.
+       */
+      leaveVoiceRoom: async (
+        _: unknown,
+        __: unknown,
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        const success = await voiceService.leaveRoom(userId);
+        return {
+          success,
+          message: success ? 'Left voice room' : 'Not in a voice room',
+        };
+      },
+
+      /**
+       * Toggle mute.
+       */
+      toggleMute: async (
+        _: unknown,
+        __: unknown,
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        const participant = await voiceService.toggleMute(userId);
+        return {
+          ...participant,
+          user: { id: participant.userId, gamertag: participant.gamertag, avatar: participant.avatar },
+          state: participant.state.toUpperCase(),
+        };
+      },
+
+      /**
+       * Toggle deafen.
+       */
+      toggleDeafen: async (
+        _: unknown,
+        __: unknown,
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        const participant = await voiceService.toggleDeafen(userId);
+        return {
+          ...participant,
+          user: { id: participant.userId, gamertag: participant.gamertag, avatar: participant.avatar },
+          state: participant.state.toUpperCase(),
+        };
+      },
+
+      // ------------------------------------------------------------------------
+      // PROFILE MUTATIONS
+      // ------------------------------------------------------------------------
+
+      /**
+       * Update profile.
+       */
+      updateProfile: async (
+        _: unknown,
+        args: {
+          input: {
+            backgroundUrl?: string;
+            themeColor?: string;
+            bio?: string;
+            region?: string;
+            languages?: string[];
+          };
+        },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        return profileService.updateProfile(userId, args.input);
+      },
+
+      /**
+       * Update privacy settings.
+       */
+      updatePrivacy: async (
+        _: unknown,
+        args: { input: Record<string, any> },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+        return profileService.updatePrivacySettings(userId, args.input);
+      },
+
+      /**
+       * Update trophy showcase.
+       */
+      updateTrophyShowcase: async (
+        _: unknown,
+        args: { achievementIds: string[] },
+        context: GraphQLContext
+      ) => {
+        const userId = getUserId(context);
+
+        // Get achievement details for each ID
+        const achievements = [];
+        for (const achievementId of args.achievementIds) {
+          // Find the achievement across all games
+          for (const [_gameId, gameAchievements] of Object.entries(
+            await Promise.all(
+              Array.from({ length: 5 }, (_, i) => gameService.getGameAchievements(`game_${i}`))
+            )
+          )) {
+            const found = gameAchievements.find(a => a.id === achievementId);
+            if (found) {
+              const game = await gameService.getGame(found.gameId);
+              achievements.push({
+                achievementId: found.id,
+                achievementName: found.name,
+                gameId: found.gameId,
+                gameTitle: game?.title || 'Unknown',
+                trophyType: found.trophyType as any,
+                rarity: found.rarity as any,
+                iconUrl: found.iconUrl,
+                unlockedAt: new Date().toISOString(),
+              });
+              break;
+            }
+          }
+        }
+
+        const showcase = await profileService.updateTrophyShowcase(userId, achievements);
+        return showcase.slots.filter(s => s !== null);
       },
     },
 
@@ -764,6 +1902,117 @@ export const createResolvers = (
       newMessageNotification: {
         subscribe: () => pubsub.asyncIterator([EVENTS.MESSAGE_RECEIVED]),
       },
+
+      // -----------------------------------------------------------------------
+      // FRIEND SUBSCRIPTIONS
+      // -----------------------------------------------------------------------
+
+      /**
+       * Subscribe to all friend events for the authenticated user.
+       *
+       * FILTERING:
+       * Events are published to user-specific channels:
+       * FRIEND_EVENT.{userId}
+       *
+       * This ensures users only receive their own events, even when
+       * multiple users share the same server instance.
+       */
+      friendEventReceived: {
+        subscribe: (_: unknown, __: unknown, context: GraphQLContext) => {
+          const userId = context.user?.userId;
+          if (!userId) {
+            throw new Error('Authentication required for friend events');
+          }
+          return pubsub.asyncIterator([`${EVENTS.FRIEND_EVENT}.${userId}`]);
+        },
+      },
+
+      /**
+       * Subscribe to incoming friend requests only.
+       *
+       * Useful for:
+       * - Showing notification badge on friends icon
+       * - Toast notifications for new requests
+       */
+      friendRequestReceived: {
+        subscribe: (_: unknown, __: unknown, context: GraphQLContext) => {
+          const userId = context.user?.userId;
+          if (!userId) {
+            throw new Error('Authentication required for friend request events');
+          }
+          return pubsub.asyncIterator([`${EVENTS.FRIEND_REQUEST_RECEIVED}.${userId}`]);
+        },
+      },
+
+      // -----------------------------------------------------------------------
+      // GAME SUBSCRIPTIONS
+      // -----------------------------------------------------------------------
+
+      /**
+       * Subscribe to game invites.
+       */
+      gameInviteReceived: {
+        subscribe: (_: unknown, __: unknown, context: GraphQLContext) => {
+          const userId = context.user?.userId;
+          if (!userId) {
+            throw new Error('Authentication required for game invites');
+          }
+          return pubsub.asyncIterator([`GAME_INVITE_RECEIVED.${userId}`]);
+        },
+      },
+
+      /**
+       * Subscribe to friend session updates.
+       */
+      friendSessionUpdated: {
+        subscribe: () => pubsub.asyncIterator(['FRIEND_SESSION_UPDATED']),
+      },
+
+      /**
+       * Subscribe to friend achievement unlocks.
+       */
+      friendAchievementUnlocked: {
+        subscribe: () => pubsub.asyncIterator(['FRIEND_ACHIEVEMENT_UNLOCKED']),
+      },
+
+      // -----------------------------------------------------------------------
+      // ACTIVITY FEED SUBSCRIPTIONS
+      // -----------------------------------------------------------------------
+
+      /**
+       * Subscribe to new activities from friends.
+       */
+      newActivity: {
+        subscribe: (_: unknown, __: unknown, context: GraphQLContext) => {
+          const userId = context.user?.userId;
+          if (!userId) {
+            throw new Error('Authentication required for activity feed');
+          }
+          return pubsub.asyncIterator([`NEW_ACTIVITY.${userId}`]);
+        },
+      },
+
+      // -----------------------------------------------------------------------
+      // VOICE CHAT SUBSCRIPTIONS
+      // -----------------------------------------------------------------------
+
+      /**
+       * Subscribe to voice room updates.
+       */
+      voiceRoomUpdated: {
+        subscribe: (_: unknown, args: { roomId: string }) => {
+          return pubsub.asyncIterator([`VOICE_ROOM_UPDATED.${args.roomId}`]);
+        },
+      },
+
+      /**
+       * Subscribe to voice participant updates.
+       */
+      voiceParticipantUpdated: {
+        subscribe: (_: unknown, args: { roomId: string }) => {
+          return pubsub.asyncIterator([`VOICE_PARTICIPANT_UPDATED.${args.roomId}`]);
+        },
+      },
     },
 
     // ==========================================================================
@@ -791,7 +2040,7 @@ export const createResolvers = (
        * Instead of N queries for N participants,
        * we batch fetch all at once.
        */
-      participants: async (parent: any, _: unknown, context: GraphQLContext) => {
+      participants: async (parent: any, _: unknown, _context: GraphQLContext) => {
         return authService.getUsersByIds(parent.participantIds);
       },
 

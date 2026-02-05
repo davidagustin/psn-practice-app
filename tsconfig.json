@@ -90,5 +90,11 @@
     "forceConsistentCasingInFileNames": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "frontend"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "frontend",
+    "src/microservices/**/*",
+    "src/infrastructure/**/*"
+  ]
 }

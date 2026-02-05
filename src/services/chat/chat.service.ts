@@ -79,6 +79,41 @@ interface ChatConfig {
 
   /** How long typing indicator stays active (seconds) */
   typingTTL: number;
+
+  /** Rate limit: max messages per window */
+  rateLimitMaxMessages: number;
+
+  /** Rate limit: window in seconds */
+  rateLimitWindowSeconds: number;
+}
+
+/**
+ * Rate limit result for spam prevention.
+ *
+ * RATE LIMITING STRATEGY:
+ * We use a sliding window approach with Redis:
+ * - Key: ratelimit:chat:{userId}
+ * - Store timestamps of recent messages
+ * - Count messages within the window
+ * - If over limit, reject with retry-after time
+ *
+ * INTERVIEW TIP:
+ * "Rate limiting is essential for chat to prevent spam and abuse.
+ * We use Redis sorted sets with timestamps as scores, allowing
+ * efficient sliding window calculations with ZRANGEBYSCORE."
+ */
+interface RateLimitResult {
+  /** Whether the action is allowed */
+  allowed: boolean;
+
+  /** Number of remaining actions in current window */
+  remaining: number;
+
+  /** Seconds until the limit resets */
+  resetInSeconds: number;
+
+  /** If not allowed, seconds until user can retry */
+  retryAfterSeconds?: number;
 }
 
 /**
@@ -135,6 +170,8 @@ export class ChatService extends EventEmitter {
       maxMessagesInCache: config?.maxMessagesInCache || 100,
       chatChannelPrefix: config?.chatChannelPrefix || 'chat:',
       typingTTL: config?.typingTTL || 5,
+      rateLimitMaxMessages: config?.rateLimitMaxMessages || 30,
+      rateLimitWindowSeconds: config?.rateLimitWindowSeconds || 60,
     };
 
     // Initialize demo conversations
@@ -414,6 +451,16 @@ export class ChatService extends EventEmitter {
     input: SendMessageInput
   ): Promise<ChatMessage> {
     const { conversationId, content, type = 'text', metadata } = input;
+
+    // -------------------------------------------------------------------------
+    // STEP 0: CHECK RATE LIMIT (Spam Prevention)
+    // -------------------------------------------------------------------------
+    const rateLimitResult = await this.checkRateLimit(senderId);
+    if (!rateLimitResult.allowed) {
+      throw new Error(
+        `Rate limit exceeded. Please wait ${rateLimitResult.retryAfterSeconds} seconds before sending another message.`
+      );
+    }
 
     // -------------------------------------------------------------------------
     // STEP 1: VALIDATE SENDER IS A PARTICIPANT
@@ -739,6 +786,86 @@ export class ChatService extends EventEmitter {
     return async () => {
       await this.subscriber.unsubscribe(channel);
       this.subscriber.off('message', handler);
+    };
+  }
+
+  // ============================================================================
+  // RATE LIMITING
+  // ============================================================================
+
+  /**
+   * Check if user is within rate limits for sending messages.
+   *
+   * SLIDING WINDOW ALGORITHM:
+   * 1. Store each message timestamp in a sorted set (score = timestamp)
+   * 2. Remove old entries outside the window
+   * 3. Count remaining entries
+   * 4. If count < limit, allow and add new timestamp
+   *
+   * WHY SLIDING WINDOW?
+   * - More fair than fixed windows (no "burst at window edge" problem)
+   * - Memory efficient with automatic cleanup
+   * - O(log N) operations with sorted sets
+   *
+   * @param userId - User attempting to send message
+   * @returns Rate limit result with allowed status
+   */
+  async checkRateLimit(userId: string): Promise<RateLimitResult> {
+    const key = `${this.config.chatChannelPrefix}ratelimit:${userId}`;
+    const now = Date.now();
+    const windowStart = now - this.config.rateLimitWindowSeconds * 1000;
+
+    // Remove old entries outside the window
+    await this.redis.zremrangebyscore(key, 0, windowStart);
+
+    // Count current entries in window
+    const currentCount = await this.redis.zcard(key);
+
+    if (currentCount >= this.config.rateLimitMaxMessages) {
+      // Get the oldest entry to calculate retry-after
+      const oldest = await this.redis.zrange(key, 0, 0, 'WITHSCORES');
+      const oldestTimestamp = oldest.length > 1 ? parseInt(oldest[1]) : now;
+      const retryAfterSeconds = Math.ceil(
+        (oldestTimestamp + this.config.rateLimitWindowSeconds * 1000 - now) / 1000
+      );
+
+      console.log(`[ChatService] Rate limit exceeded for user ${userId}`);
+
+      return {
+        allowed: false,
+        remaining: 0,
+        resetInSeconds: this.config.rateLimitWindowSeconds,
+        retryAfterSeconds: Math.max(1, retryAfterSeconds),
+      };
+    }
+
+    // Add current timestamp and set expiry on the key
+    await this.redis.zadd(key, now, `${now}-${uuidv4()}`);
+    await this.redis.expire(key, this.config.rateLimitWindowSeconds + 1);
+
+    return {
+      allowed: true,
+      remaining: this.config.rateLimitMaxMessages - currentCount - 1,
+      resetInSeconds: this.config.rateLimitWindowSeconds,
+    };
+  }
+
+  /**
+   * Get current rate limit status without consuming a request.
+   */
+  async getRateLimitStatus(userId: string): Promise<RateLimitResult> {
+    const key = `${this.config.chatChannelPrefix}ratelimit:${userId}`;
+    const now = Date.now();
+    const windowStart = now - this.config.rateLimitWindowSeconds * 1000;
+
+    // Clean up and count without adding
+    await this.redis.zremrangebyscore(key, 0, windowStart);
+    const currentCount = await this.redis.zcard(key);
+
+    return {
+      allowed: currentCount < this.config.rateLimitMaxMessages,
+      remaining: Math.max(0, this.config.rateLimitMaxMessages - currentCount),
+      resetInSeconds: this.config.rateLimitWindowSeconds,
     };
   }
 
