@@ -1,0 +1,695 @@
+/**
+ * ==============================================================================
+ * PLAYSTATION NETWORK - GLOBAL STYLES
+ * ==============================================================================
+ *
+ * This stylesheet defines the PlayStation-inspired visual design.
+ *
+ * PLAYSTATION UI CHARACTERISTICS:
+ * ===============================
+ * - Dark backgrounds (#0a0a0f to #1a1a2e gradient)
+ * - Blue accent colors (#0070d1 - PlayStation blue)
+ * - Clean, minimal design
+ * - Card-based layouts with subtle shadows
+ * - Smooth transitions and animations
+ * - Sans-serif typography
+ *
+ * CSS CUSTOM PROPERTIES (Variables):
+ * =================================
+ * We use CSS custom properties for:
+ * - Easy theme changes
+ * - Consistent colors throughout app
+ * - Runtime theme switching capability
+ */
+
+/* ===========================================================================
+   CSS CUSTOM PROPERTIES (Design Tokens)
+   =========================================================================== */
+
+:root {
+  /* -------------------------------------------------------------------------
+     COLOR PALETTE
+     -------------------------------------------------------------------------
+     These are the core colors used throughout the PlayStation interface.
+   */
+
+  /* Background colors */
+  --color-bg-primary: #0a0a0f;      /* Darkest background */
+  --color-bg-secondary: #1a1a2e;    /* Card backgrounds */
+  --color-bg-tertiary: #16213e;     /* Elevated surfaces */
+  --color-bg-hover: #2a2a4e;        /* Hover state */
+
+  /* PlayStation brand colors */
+  --color-ps-blue: #0070d1;         /* Primary action color */
+  --color-ps-blue-light: #1e90ff;   /* Hover state for blue */
+  --color-ps-blue-dark: #005bb5;    /* Active/pressed state */
+
+  /* Status colors */
+  --color-online: #00d4aa;          /* User is online */
+  --color-away: #ffa500;            /* User is away/idle */
+  --color-busy: #ff4444;            /* User is busy/DND */
+  --color-offline: #666666;         /* User is offline */
+
+  /* Text colors */
+  --color-text-primary: #ffffff;    /* Main text */
+  --color-text-secondary: #a0a0a0;  /* Subdued text */
+  --color-text-muted: #666666;      /* Very subdued */
+
+  /* Border colors */
+  --color-border: rgba(255, 255, 255, 0.1);
+  --color-border-focus: var(--color-ps-blue);
+
+  /* -------------------------------------------------------------------------
+     TYPOGRAPHY
+     -------------------------------------------------------------------------
+   */
+
+  --font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen,
+    Ubuntu, Cantarell, sans-serif;
+
+  --font-size-xs: 0.75rem;    /* 12px */
+  --font-size-sm: 0.875rem;   /* 14px */
+  --font-size-base: 1rem;     /* 16px */
+  --font-size-lg: 1.125rem;   /* 18px */
+  --font-size-xl: 1.25rem;    /* 20px */
+  --font-size-2xl: 1.5rem;    /* 24px */
+  --font-size-3xl: 2rem;      /* 32px */
+
+  --font-weight-normal: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+
+  /* -------------------------------------------------------------------------
+     SPACING
+     -------------------------------------------------------------------------
+     Consistent spacing scale based on 4px base unit.
+   */
+
+  --space-1: 0.25rem;   /* 4px */
+  --space-2: 0.5rem;    /* 8px */
+  --space-3: 0.75rem;   /* 12px */
+  --space-4: 1rem;      /* 16px */
+  --space-5: 1.25rem;   /* 20px */
+  --space-6: 1.5rem;    /* 24px */
+  --space-8: 2rem;      /* 32px */
+  --space-10: 2.5rem;   /* 40px */
+  --space-12: 3rem;     /* 48px */
+
+  /* -------------------------------------------------------------------------
+     BORDER RADIUS
+     -------------------------------------------------------------------------
+   */
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-full: 9999px;
+
+  /* -------------------------------------------------------------------------
+     SHADOWS
+     -------------------------------------------------------------------------
+   */
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.5);
+  --shadow-glow: 0 0 20px rgba(0, 112, 209, 0.3);
+
+  /* -------------------------------------------------------------------------
+     TRANSITIONS
+     -------------------------------------------------------------------------
+   */
+
+  --transition-fast: 150ms ease;
+  --transition-base: 200ms ease;
+  --transition-slow: 300ms ease;
+}
+
+/* ===========================================================================
+   RESET & BASE STYLES
+   =========================================================================== */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  /* Prevent font size scaling on mobile */
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  font-family: var(--font-family);
+  font-size: var(--font-size-base);
+  line-height: 1.6;
+  color: var(--color-text-primary);
+  background: linear-gradient(
+    135deg,
+    var(--color-bg-primary) 0%,
+    var(--color-bg-secondary) 50%,
+    var(--color-bg-tertiary) 100%
+  );
+  background-attachment: fixed;
+  min-height: 100vh;
+
+  /* Smooth scrolling */
+  scroll-behavior: smooth;
+
+  /* Better text rendering */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ===========================================================================
+   LAYOUT COMPONENTS
+   =========================================================================== */
+
+/**
+ * CONTAINER
+ * Centers content with max width and padding.
+ */
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 var(--space-4);
+}
+
+/**
+ * CARD
+ * Base card component for content sections.
+ */
+.card {
+  background: var(--color-bg-secondary);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border);
+  padding: var(--space-4);
+  box-shadow: var(--shadow-md);
+  transition: transform var(--transition-base),
+              box-shadow var(--transition-base);
+}
+
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-lg);
+}
+
+/**
+ * HEADER
+ * Top navigation bar.
+ */
+.header {
+  background: rgba(10, 10, 15, 0.95);
+  border-bottom: 1px solid var(--color-border);
+  padding: var(--space-4);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  backdrop-filter: blur(10px);
+}
+
+.header__content {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.header__logo {
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-bold);
+  color: var(--color-ps-blue);
+  text-decoration: none;
+}
+
+/* ===========================================================================
+   FRIEND LIST STYLES
+   =========================================================================== */
+
+/**
+ * FRIEND ITEM
+ * Individual friend in the friends list.
+ */
+.friend-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  transition: background var(--transition-fast);
+  cursor: pointer;
+}
+
+.friend-item:hover {
+  background: var(--color-bg-hover);
+}
+
+/**
+ * AVATAR
+ * User avatar with online status indicator.
+ */
+.avatar {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-full);
+  background: var(--color-bg-tertiary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--font-size-xl);
+  flex-shrink: 0;
+}
+
+.avatar--sm {
+  width: 32px;
+  height: 32px;
+  font-size: var(--font-size-base);
+}
+
+.avatar--lg {
+  width: 64px;
+  height: 64px;
+  font-size: var(--font-size-2xl);
+}
+
+/**
+ * STATUS INDICATOR
+ * Online/offline dot on avatar.
+ */
+.status-indicator {
+  position: absolute;
+  bottom: 2px;
+  right: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: var(--radius-full);
+  border: 2px solid var(--color-bg-secondary);
+}
+
+.status-indicator--online {
+  background: var(--color-online);
+  box-shadow: 0 0 8px var(--color-online);
+}
+
+.status-indicator--away {
+  background: var(--color-away);
+}
+
+.status-indicator--busy {
+  background: var(--color-busy);
+}
+
+.status-indicator--offline {
+  background: var(--color-offline);
+}
+
+/**
+ * FRIEND INFO
+ */
+.friend-info {
+  flex: 1;
+  min-width: 0; /* Allows text truncation */
+}
+
+.friend-name {
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.friend-status {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.friend-game {
+  color: var(--color-ps-blue);
+}
+
+/* ===========================================================================
+   CHAT STYLES
+   =========================================================================== */
+
+/**
+ * CHAT CONTAINER
+ */
+.chat-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  max-height: calc(100vh - 200px);
+}
+
+/**
+ * MESSAGE LIST
+ */
+.message-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/**
+ * MESSAGE BUBBLE
+ */
+.message {
+  max-width: 70%;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-lg);
+  animation: messageSlide 0.2s ease;
+}
+
+@keyframes messageSlide {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.message--sent {
+  align-self: flex-end;
+  background: var(--color-ps-blue);
+  color: white;
+  border-bottom-right-radius: var(--radius-sm);
+}
+
+.message--received {
+  align-self: flex-start;
+  background: var(--color-bg-tertiary);
+  border-bottom-left-radius: var(--radius-sm);
+}
+
+.message__sender {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-1);
+}
+
+.message__content {
+  word-wrap: break-word;
+}
+
+.message__time {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  margin-top: var(--space-1);
+  text-align: right;
+}
+
+/**
+ * CHAT INPUT
+ */
+.chat-input-container {
+  display: flex;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  background: var(--color-bg-secondary);
+  border-top: 1px solid var(--color-border);
+}
+
+.chat-input {
+  flex: 1;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-full);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-base);
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+
+.chat-input:focus {
+  border-color: var(--color-ps-blue);
+}
+
+.chat-input::placeholder {
+  color: var(--color-text-muted);
+}
+
+/* ===========================================================================
+   BUTTONS
+   =========================================================================== */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-6);
+  border-radius: var(--radius-md);
+  border: none;
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  text-decoration: none;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn--primary {
+  background: var(--color-ps-blue);
+  color: white;
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: var(--color-ps-blue-light);
+  box-shadow: var(--shadow-glow);
+}
+
+.btn--primary:active:not(:disabled) {
+  background: var(--color-ps-blue-dark);
+}
+
+.btn--secondary {
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border);
+}
+
+.btn--secondary:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+}
+
+.btn--icon {
+  padding: var(--space-3);
+  border-radius: var(--radius-full);
+}
+
+/* ===========================================================================
+   FORM ELEMENTS
+   =========================================================================== */
+
+.form-group {
+  margin-bottom: var(--space-4);
+}
+
+.form-label {
+  display: block;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-2);
+}
+
+.form-input {
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-base);
+  outline: none;
+  transition: border-color var(--transition-fast),
+              box-shadow var(--transition-fast);
+}
+
+.form-input:focus {
+  border-color: var(--color-ps-blue);
+  box-shadow: 0 0 0 3px rgba(0, 112, 209, 0.2);
+}
+
+.form-input::placeholder {
+  color: var(--color-text-muted);
+}
+
+.form-error {
+  color: var(--color-busy);
+  font-size: var(--font-size-sm);
+  margin-top: var(--space-1);
+}
+
+/* ===========================================================================
+   LOADING & STATES
+   =========================================================================== */
+
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-8);
+}
+
+.loading-spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid var(--color-border);
+  border-top-color: var(--color-ps-blue);
+  border-radius: var(--radius-full);
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.empty-state {
+  text-align: center;
+  padding: var(--space-8);
+  color: var(--color-text-secondary);
+}
+
+.error-message {
+  background: rgba(255, 68, 68, 0.1);
+  border: 1px solid var(--color-busy);
+  color: var(--color-busy);
+  padding: var(--space-4);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-4);
+}
+
+/* ===========================================================================
+   ANIMATIONS
+   =========================================================================== */
+
+/**
+ * FADE IN
+ */
+.fade-in {
+  animation: fadeIn 0.3s ease;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/**
+ * SLIDE UP
+ */
+.slide-up {
+  animation: slideUp 0.3s ease;
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/**
+ * PULSE (for online indicator)
+ */
+.pulse {
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(0, 212, 170, 0.4);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(0, 212, 170, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(0, 212, 170, 0);
+  }
+}
+
+/* ===========================================================================
+   UTILITY CLASSES
+   =========================================================================== */
+
+.text-center {
+  text-align: center;
+}
+
+.text-muted {
+  color: var(--color-text-secondary);
+}
+
+.mt-4 {
+  margin-top: var(--space-4);
+}
+
+.mb-4 {
+  margin-bottom: var(--space-4);
+}
+
+.flex {
+  display: flex;
+}
+
+.flex-col {
+  flex-direction: column;
+}
+
+.items-center {
+  align-items: center;
+}
+
+.justify-center {
+  justify-content: center;
+}
+
+.gap-2 {
+  gap: var(--space-2);
+}
+
+.gap-4 {
+  gap: var(--space-4);
+}
+
+.w-full {
+  width: 100%;
+}
+
+.h-screen {
+  height: 100vh;
+}

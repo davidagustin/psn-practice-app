@@ -1,0 +1,94 @@
+{
+  "compilerOptions": {
+    /* ============================================================
+     * PLAYSTATION NETWORK STUDY PROJECT - TYPESCRIPT CONFIGURATION
+     * ============================================================
+     *
+     * This configuration mirrors enterprise-grade TypeScript setups
+     * used at companies like PlayStation/Sony for backend services.
+     *
+     * KEY CONCEPTS TO UNDERSTAND:
+     * - Strict type checking catches bugs at compile time
+     * - ES Modules (ESM) are the modern standard
+     * - Source maps enable debugging compiled code
+     * ============================================================ */
+
+    /* TARGET & MODULE SYSTEM
+     * ---------------------
+     * target: Which JavaScript version to compile to
+     * - ES2022 includes modern features like top-level await
+     *
+     * module: How modules are organized
+     * - CommonJS: Node.js traditional format (require/module.exports)
+     * - ESNext: Modern ES modules (import/export)
+     */
+    "target": "ES2022",
+    "module": "CommonJS",
+    "lib": ["ES2022"],
+
+    /* OUTPUT CONFIGURATION
+     * --------------------
+     * outDir: Where compiled JavaScript goes
+     * rootDir: Where TypeScript source files are
+     */
+    "outDir": "./dist",
+    "rootDir": "./src",
+
+    /* STRICT TYPE CHECKING
+     * --------------------
+     * These options make TypeScript catch more potential bugs.
+     * PlayStation and similar companies use strict mode to ensure
+     * code quality at scale with many developers.
+     */
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "strictBindCallApply": true,
+    "strictPropertyInitialization": true,
+    "noImplicitThis": true,
+    "alwaysStrict": true,
+
+    /* MODULE RESOLUTION
+     * -----------------
+     * esModuleInterop: Allows importing CommonJS modules with ES syntax
+     * resolveJsonModule: Allows importing JSON files directly
+     */
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "moduleResolution": "node",
+
+    /* DEVELOPMENT EXPERIENCE
+     * ----------------------
+     * sourceMap: Maps compiled JS back to TS for debugging
+     * declaration: Generates .d.ts files for library usage
+     */
+    "sourceMap": true,
+    "declaration": true,
+
+    /* CODE QUALITY
+     * ------------
+     * These catch common mistakes and unused code
+     */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+
+    /* EXPERIMENTAL FEATURES
+     * ---------------------
+     * Decorators are used by some GraphQL libraries
+     */
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+
+    /* PERFORMANCE
+     * -----------
+     * skipLibCheck: Speeds up compilation by skipping .d.ts checks
+     */
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", "frontend"]
+}

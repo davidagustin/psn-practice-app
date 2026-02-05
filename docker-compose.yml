@@ -1,0 +1,243 @@
+# ==============================================================================
+# PLAYSTATION NETWORK INFRASTRUCTURE - DOCKER COMPOSE
+# ==============================================================================
+#
+# This file sets up the local development infrastructure that mirrors
+# PlayStation's production environment. In production, PlayStation uses:
+#
+# - AWS ElastiCache (Redis) → We use Docker Redis locally
+# - AWS MSK (Managed Kafka) → We use Docker Kafka locally
+# - AWS DynamoDB → We use DynamoDB Local for development
+#
+# WHY THESE SERVICES?
+# -------------------
+# 1. REDIS: Real-time data, sessions, pub/sub for presence updates
+#    - PlayStation uses Redis for friend online status (sub-100ms updates)
+#    - Stores user sessions for fast authentication
+#    - Pub/Sub enables real-time friend notifications
+#
+# 2. KAFKA: Event streaming for high-volume data
+#    - Achievement unlocks, game activity feeds
+#    - Handles millions of events per second at PlayStation scale
+#    - Decouples services for reliability
+#
+# 3. DYNAMODB: NoSQL database for user profiles, social graphs
+#    - Scales horizontally for 100M+ PSN users
+#    - Fast key-value lookups for gaming data
+#
+# LEARNING TIP:
+# Understanding why each service is used is as important as knowing how to use it.
+# Interview questions often focus on "why did you choose X?" not just "how does X work?"
+# ==============================================================================
+
+version: '3.8'
+
+services:
+  # ============================================================================
+  # REDIS - REAL-TIME DATA STORE & MESSAGE BROKER
+  # ============================================================================
+  #
+  # WHAT REDIS DOES IN PLAYSTATION'S ARCHITECTURE:
+  # ---------------------------------------------
+  # 1. SESSION STORAGE: Stores user login sessions with TTL (time-to-live)
+  #    - Key pattern: "session:{userId}" → User session data
+  #    - TTL ensures sessions auto-expire for security
+  #
+  # 2. PRESENCE SYSTEM: Tracks who's online in real-time
+  #    - Key pattern: "presence:{userId}" → Online status, current game
+  #    - Friends can see status updates within milliseconds
+  #
+  # 3. PUB/SUB: Real-time notifications between services
+  #    - When you change status, Redis publishes to all friends' channels
+  #    - This is how PSN shows "Friend X started playing Game Y" instantly
+  #
+  # 4. CACHING: Reduces database load for frequently accessed data
+  #    - User profiles, friend lists, leaderboards
+  #
+  # INTERVIEW TIP:
+  # "We use Redis because it provides sub-millisecond read/write operations
+  # with built-in pub/sub for real-time features. The combination of caching,
+  # session management, and pub/sub in one service simplifies our architecture."
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: psn-redis
+    ports:
+      - "6379:6379"
+    # Persist data even after container restarts (optional for development)
+    volumes:
+      - redis_data:/data
+    # Custom Redis configuration for better performance
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    # Health check ensures Redis is ready before dependent services start
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - psn-network
+
+  # ============================================================================
+  # REDIS COMMANDER - WEB UI FOR REDIS (DEVELOPMENT TOOL)
+  # ============================================================================
+  #
+  # This provides a visual interface to see what's stored in Redis.
+  # Very helpful for debugging and understanding data patterns.
+  #
+  # Access at: http://localhost:8081
+  # ============================================================================
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: psn-redis-ui
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis
+    networks:
+      - psn-network
+
+  # ============================================================================
+  # ZOOKEEPER - KAFKA COORDINATION SERVICE
+  # ============================================================================
+  #
+  # Zookeeper manages Kafka cluster coordination:
+  # - Keeps track of which Kafka brokers are alive
+  # - Manages topic configurations
+  # - Handles leader election for partitions
+  #
+  # INTERVIEW TIP:
+  # "Zookeeper is the coordination layer that makes Kafka's distributed
+  # architecture possible. It's like the 'brain' that keeps all Kafka
+  # brokers synchronized."
+  #
+  # NOTE: Newer Kafka versions (3.0+) can run without Zookeeper using KRaft,
+  # but Zookeeper setup is still common in production.
+  # ============================================================================
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: psn-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - psn-network
+
+  # ============================================================================
+  # KAFKA - EVENT STREAMING PLATFORM
+  # ============================================================================
+  #
+  # WHAT KAFKA DOES IN PLAYSTATION'S ARCHITECTURE:
+  # ---------------------------------------------
+  # 1. ACTIVITY FEEDS: When you unlock an achievement, Kafka distributes
+  #    that event to multiple consumers (friends' feeds, leaderboards, stats)
+  #
+  # 2. DECOUPLING: Services don't call each other directly. Instead:
+  #    - Achievement Service → publishes "achievement_unlocked" event to Kafka
+  #    - Feed Service → consumes event and updates activity feed
+  #    - Notification Service → consumes event and sends push notification
+  #    - Analytics Service → consumes event for statistics
+  #
+  # 3. RELIABILITY: If a service goes down, events queue up in Kafka
+  #    and get processed when the service recovers (no data loss)
+  #
+  # 4. SCALABILITY: Can handle millions of events per second
+  #    - PlayStation processes billions of gaming events daily
+  #
+  # KEY KAFKA CONCEPTS:
+  # ------------------
+  # - TOPIC: A category of messages (e.g., "user-presence", "achievements")
+  # - PARTITION: Splits a topic for parallel processing
+  # - CONSUMER GROUP: Multiple consumers sharing the workload
+  # - OFFSET: Position in the log (how Kafka knows what you've read)
+  #
+  # INTERVIEW TIP:
+  # "Kafka enables event-driven architecture where services communicate
+  # through events rather than direct calls. This provides loose coupling,
+  # better reliability, and makes the system more scalable."
+  # ============================================================================
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: psn-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      # Internal listener (for Docker network) and external (for host machine)
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      # Auto-create topics for development convenience
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks:
+      - psn-network
+
+  # ============================================================================
+  # DYNAMODB LOCAL - NOSQL DATABASE
+  # ============================================================================
+  #
+  # WHAT DYNAMODB DOES IN PLAYSTATION'S ARCHITECTURE:
+  # ------------------------------------------------
+  # 1. USER PROFILES: Gamertag, avatar, level, trophies
+  #    - Key: { PK: "USER#123", SK: "PROFILE" }
+  #
+  # 2. FRIEND RELATIONSHIPS: Social graph storage
+  #    - Key: { PK: "USER#123", SK: "FRIEND#456" }
+  #    - Enables fast "get all friends" queries
+  #
+  # 3. GAME HISTORY: What games you've played, playtime, achievements
+  #    - Key: { PK: "USER#123", SK: "GAME#SpiderMan2" }
+  #
+  # WHY DYNAMODB (NoSQL) OVER POSTGRESQL (SQL)?
+  # ------------------------------------------
+  # - Horizontal scaling: Add more servers as users grow
+  # - Predictable performance: Single-digit millisecond latency at any scale
+  # - Flexible schema: Easy to add new fields without migrations
+  # - Pay per request: Cost-effective for variable traffic
+  #
+  # INTERVIEW TIP:
+  # "We chose DynamoDB because gaming data is hierarchical (user → games → achievements)
+  # and NoSQL's flexible schema handles the variety of game-specific data.
+  # The consistent sub-10ms latency is critical for real-time gaming features."
+  # ============================================================================
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    container_name: psn-dynamodb
+    ports:
+      - "8000:8000"
+    command: "-jar DynamoDBLocal.jar -sharedDb -dbPath /data"
+    volumes:
+      - dynamodb_data:/data
+    networks:
+      - psn-network
+
+# ==============================================================================
+# NETWORKS
+# ==============================================================================
+# Docker networks allow containers to communicate with each other by name.
+# For example, the Node.js app can connect to "redis:6379" instead of
+# needing to know the actual IP address.
+networks:
+  psn-network:
+    driver: bridge
+
+# ==============================================================================
+# VOLUMES
+# ==============================================================================
+# Volumes persist data even when containers are stopped/removed.
+# This means you won't lose your Redis cache or DynamoDB data during development.
+volumes:
+  redis_data:
+  dynamodb_data:

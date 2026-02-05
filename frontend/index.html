@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PSN Social Platform - Study Project</title>
+    <!--
+      ==========================================================================
+      PLAYSTATION-INSPIRED STYLING
+      ==========================================================================
+
+      PlayStation's UI uses:
+      - Dark backgrounds with blue/cyan accents
+      - Clean, sans-serif typography
+      - Smooth animations and transitions
+      - Card-based layouts
+
+      This demo uses minimal external dependencies to keep focus on architecture.
+    -->
+    <style>
+      /* Reset and base styles */
+      *, *::before, *::after {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+        background: linear-gradient(135deg, #0a0a0f 0%, #1a1a2e 50%, #16213e 100%);
+        color: #ffffff;
+        min-height: 100vh;
+        line-height: 1.6;
+      }
+
+      #root {
+        min-height: 100vh;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
