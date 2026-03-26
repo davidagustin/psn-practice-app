@@ -21,7 +21,7 @@
   "author": "Interview Study Project",
   "license": "MIT",
   "dependencies": {
-    "@apollo/server": "^4.10.0",
+    "@apollo/server": "^5.5.0",
     "apollo-server-express": "^3.13.0",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
